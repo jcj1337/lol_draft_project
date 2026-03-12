@@ -27,9 +27,9 @@ REALM = "na"            # For latest patch lookup later
 
 QUEUE = "RANKED_SOLO_5x5"
 QUEUE_ID = 420          # Ranked solo/duo id 
-TARGET_MATCHES = 500    # Change depending on size we want, (upper limit)
-SEED_PLAYERS = 50       # Number of players to find (size related)
-MATCH_IDS_PER_PLAYER = 20 # How many matches/player
+TARGET_MATCHES = 10000    # Change depending on size we want, (upper limit)
+SEED_PLAYERS = 2000      # Number of players to find (size related)
+MATCH_IDS_PER_PLAYER = 30 # How many matches/player
 RANDOM_SEED = 42
 
 OUT_DIR = Path("data/processed")

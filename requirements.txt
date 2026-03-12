@@ -2,3 +2,5 @@ requests
 pandas
 python-dotenv
 jupyter
+torch
+matplotlib
