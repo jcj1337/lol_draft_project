@@ -20,20 +20,21 @@ OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # hyperparams
-BATCH_SIZE = 32
+BATCH_SIZE =8
 EMBED_DIM = 32
 NUM_HEADS = 2
-NUM_LAYERS = 1
+NUM_LAYERS = 2
 FF_DIM = 64
-DROPOUT = 0.1
+DROPOUT = 0.2
 MLP_HIDDEN_DIM = 64
 LEARNING_RATE = 0.001
-EPOCHS = 2
+EPOCHS = 5
 SEED = 42
-
+# asdf asd f
+TRAIN_SUBSET_ROWS = 240
 # don't change these ever
-TEAM_A_COLS = [f"team_a_{i}" for i in range(1, 6)]
-TEAM_B_COLS = [f"team_b_{i}" for i in range(1, 6)]
+TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
+TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
 LABEL_COL = "team_a_win"
 
 # seed
@@ -47,6 +48,10 @@ def find_latest_cleaned_csv(data_dir: Path) -> Path:
         raise FileNotFoundError(f"No cleaned CSV found in {data_dir.resolve()}")
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
+def take_subset(df: pd.DataFrame, n_rows: int) -> pd.DataFrame:
+    if n_rows > len(df):
+        raise ValueError(f"Requested {n_rows} rows, but only have {len(df)}")
+    return df.iloc[:n_rows].reset_index(drop=True)
 
 def split_dataframe(
     df: pd.DataFrame,
@@ -72,7 +77,7 @@ def split_dataframe(
     val_idx = perm[train_end:val_end]
     test_idx = perm[val_end:]
 
-    # safeguard against tiny datasets
+    # for too small
     if len(val_idx) == 0 or len(test_idx) == 0:
         raise ValueError(
             f"Split too small. Got train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}"
@@ -114,7 +119,8 @@ def train_one_epoch(
         labels = batch["label"].to(device)
 
         optimizer.zero_grad()
-        logits = model(champ_ids, team_ids)
+        role_ids = batch["role_ids"].to(device)
+        logits = model(champ_ids, team_ids, role_ids)
         loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
@@ -143,7 +149,8 @@ def evaluate(
         team_ids = batch["team_ids"].to(device)
         labels = batch["label"].to(device)
 
-        logits = model(champ_ids, team_ids)
+        role_ids = batch["role_ids"].to(device)
+        logits = model(champ_ids, team_ids, role_ids)
         loss = criterion(logits, labels)
 
         probs = torch.sigmoid(logits)
@@ -180,17 +187,22 @@ def print_example_predictions(
         label = int(row[LABEL_COL])
 
         champ_ids = torch.tensor(
-            [[champ_to_id[c] for c in team_a + team_b]],
-            dtype=torch.long,
-            device=device,
-        )
+    [[champ_to_id[c] for c in team_a + team_b]],
+    dtype=torch.long,
+    device=device,
+)
         team_ids = torch.tensor(
             [[0] * 5 + [1] * 5],
             dtype=torch.long,
             device=device,
         )
+        role_ids = torch.tensor(
+            [[0, 1, 2, 3, 4, 0, 1, 2, 3, 4]],
+            dtype=torch.long,
+            device=device,
+        )
 
-        logit = model(champ_ids, team_ids)
+        logit = model(champ_ids, team_ids, role_ids)
         prob = torch.sigmoid(logit).item()
         pred = int(prob >= 0.5)
 
@@ -231,6 +243,11 @@ def main() -> None:
 
     train_df, val_df, test_df = split_dataframe(df, 0.70, 0.15, 0.15, seed=SEED)
 
+    # tester asdf 
+    if TRAIN_SUBSET_ROWS is not None:
+        train_df = take_subset(train_df, TRAIN_SUBSET_ROWS)
+
+    # tester end 
     print(f"Total rows: {len(df)}")
     print(f"Train rows: {len(train_df)}")
     print(f"Val rows:   {len(val_df)}")

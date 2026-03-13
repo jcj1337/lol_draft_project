@@ -5,9 +5,10 @@ import pandas as pd
 INTERIM_DIR = Path("data/processed")
 PROCESSED_DIR = Path("data/cleaned")
 
-BLUE_COLS = [f"blue_{i}" for i in range(1, 6)]
-RED_COLS = [f"red_{i}" for i in range(1, 6)]
+BLUE_COLS = ["blue_top", "blue_jg", "blue_mid", "blue_adc", "blue_sup"]
+RED_COLS = ["red_top", "red_jg", "red_mid", "red_adc", "red_sup"]
 REQUIRED_COLS = ["match_id", "patch", "blue_win", *BLUE_COLS, *RED_COLS]
+
 
 def find_latest_input_csv(data_dir: Path) -> Path:
     """
@@ -48,8 +49,9 @@ def validate_input(df: pd.DataFrame) -> None:
 
 
 def canonicalize_row(row: pd.Series) -> dict:
-    blue_team = tuple(sorted(str(row[col]).strip() for col in BLUE_COLS))
-    red_team = tuple(sorted(str(row[col]).strip() for col in RED_COLS))
+    # Keep role order exactly as-is
+    blue_team = tuple(str(row[col]).strip() for col in BLUE_COLS)
+    red_team = tuple(str(row[col]).strip() for col in RED_COLS)
     blue_win = int(row["blue_win"])
 
     if len(set(blue_team)) != 5:
@@ -59,6 +61,7 @@ def canonicalize_row(row: pd.Series) -> dict:
     if set(blue_team) & set(red_team):
         raise ValueError(f"Champion overlap between teams in match {row['match_id']}")
 
+    # Side-invariant, role-preserving canonicalization
     if blue_team <= red_team:
         team_a = blue_team
         team_b = red_team
@@ -71,16 +74,16 @@ def canonicalize_row(row: pd.Series) -> dict:
     return {
         "match_id": row["match_id"],
         "patch": row["patch"],
-        "team_a_1": team_a[0],
-        "team_a_2": team_a[1],
-        "team_a_3": team_a[2],
-        "team_a_4": team_a[3],
-        "team_a_5": team_a[4],
-        "team_b_1": team_b[0],
-        "team_b_2": team_b[1],
-        "team_b_3": team_b[2],
-        "team_b_4": team_b[3],
-        "team_b_5": team_b[4],
+        "team_a_top": team_a[0],
+        "team_a_jg": team_a[1],
+        "team_a_mid": team_a[2],
+        "team_a_adc": team_a[3],
+        "team_a_sup": team_a[4],
+        "team_b_top": team_b[0],
+        "team_b_jg": team_b[1],
+        "team_b_mid": team_b[2],
+        "team_b_adc": team_b[3],
+        "team_b_sup": team_b[4],
         "team_a_win": int(team_a_win),
     }
 

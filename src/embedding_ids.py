@@ -8,11 +8,11 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
-TEAM_A_COLS = [f"team_a_{i}" for i in range(1, 6)]
-TEAM_B_COLS = [f"team_b_{i}" for i in range(1, 6)]
+TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
+TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
 ALL_CHAMP_COLS = TEAM_A_COLS + TEAM_B_COLS
 LABEL_COL = "team_a_win"
-
+ROLE_IDS = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4]
 
 def load_cleaned_csv(csv_path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -50,7 +50,7 @@ class DraftDataset(Dataset):
         team_b = [str(row[col]).strip() for col in TEAM_B_COLS]
 
         champ_ids = [self.champ_to_id[c] for c in team_a + team_b]
-
+        role_ids = ROLE_IDS
         # 0 = team A, 1 = team B
         team_ids = [0] * 5 + [1] * 5
 
@@ -59,6 +59,7 @@ class DraftDataset(Dataset):
         return {
             "champ_ids": torch.tensor(champ_ids, dtype=torch.long),  # [10]
             "team_ids": torch.tensor(team_ids, dtype=torch.long),    # [10]
+            "role_ids": torch.tensor(role_ids, dtype=torch.long),
             "label": torch.tensor(label, dtype=torch.float32),       # scalar
         }
 

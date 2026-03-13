@@ -27,9 +27,9 @@ REALM = "na"            # For latest patch lookup later
 
 QUEUE = "RANKED_SOLO_5x5"
 QUEUE_ID = 420          # Ranked solo/duo id 
-TARGET_MATCHES = 10000    # Change depending on size we want, (upper limit)
-SEED_PLAYERS = 2000      # Number of players to find (size related)
-MATCH_IDS_PER_PLAYER = 30 # How many matches/player
+TARGET_MATCHES = 500    # Change depending on size we want, (upper limit)
+SEED_PLAYERS = 50     # Number of players to find (size related)
+MATCH_IDS_PER_PLAYER = 15 # How many matches/player
 RANDOM_SEED = 42
 
 OUT_DIR = Path("data/processed")
@@ -173,18 +173,31 @@ def get_match(match_id: str) -> dict[str, Any]:
     return riot_get(url)
 
 
+ROLE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+
 def normalize_team_champs(participants: list[dict[str, Any]], team_id: int) -> list[str]:
-    """
-    Return the 5 champs on a team, sorted alphabetically
-    For simpler preprocessing and hygiene 
-    """
-    champs = [p["championName"] for p in participants if p["teamId"] == team_id]
-    champs = sorted(champs)
+    champs_by_role: dict[str, str] = {}
 
-    if len(champs) != 5:
-        raise ValueError(f"Expected 5 champions for team {team_id}, got {len(champs)}")
+    for p in participants:
+        if p["teamId"] != team_id:
+            continue
 
-    return champs
+        role = p.get("teamPosition", "")
+        champ = p["championName"]
+
+        if role not in ROLE_ORDER:
+            raise ValueError(f"Unexpected or missing role {role!r} for team {team_id}")
+
+        if role in champs_by_role:
+            raise ValueError(f"Duplicate role {role} for team {team_id}")
+
+        champs_by_role[role] = champ
+
+    missing = [role for role in ROLE_ORDER if role not in champs_by_role]
+    if missing:
+        raise ValueError(f"Missing roles for team {team_id}: {missing}")
+
+    return [champs_by_role[role] for role in ROLE_ORDER]
 
 
 def extract_row(match: dict[str, Any], patch_major_minor: str) -> dict[str, Any] | None:
@@ -214,19 +227,18 @@ def extract_row(match: dict[str, Any], patch_major_minor: str) -> dict[str, Any]
     blue_win = int(bool(blue_team["win"]))
 
     return {
-        # can remove first two just there to check for now 
         "match_id": match["metadata"]["matchId"],
         "patch": match_patch,
-        "blue_1": blue[0],
-        "blue_2": blue[1],
-        "blue_3": blue[2],
-        "blue_4": blue[3],
-        "blue_5": blue[4],
-        "red_1": red[0],
-        "red_2": red[1],
-        "red_3": red[2],
-        "red_4": red[3],
-        "red_5": red[4],
+        "blue_top": blue[0],
+        "blue_jg": blue[1],
+        "blue_mid": blue[2],
+        "blue_adc": blue[3],
+        "blue_sup": blue[4],
+        "red_top": red[0],
+        "red_jg": red[1],
+        "red_mid": red[2],
+        "red_adc": red[3],
+        "red_sup": red[4],
         "blue_win": blue_win,
     }
 
