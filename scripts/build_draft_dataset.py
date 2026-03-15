@@ -27,9 +27,9 @@ REALM = "na"            # For latest patch lookup later
 
 QUEUE = "RANKED_SOLO_5x5"
 QUEUE_ID = 420          # Ranked solo/duo id 
-TARGET_MATCHES = 10000    # Change depending on size we want, (upper limit)
-SEED_PLAYERS = 2000     # Number of players to find (size related)
-MATCH_IDS_PER_PLAYER = 10 # How many matches/player
+TARGET_MATCHES = 30000    # Change depending on size we want, (upper limit)
+SEED_PLAYERS = 5000     # Number of players to find (size related)
+MATCH_IDS_PER_PLAYER = 30 # How many matches/player
 RANDOM_SEED = 42
 
 OUT_DIR = Path("data/processed")
@@ -122,8 +122,8 @@ def collect_seed_puuids(queue: str, target_players: int) -> list[str]:
     rng = random.Random(RANDOM_SEED)
     puuids: set[str] = set()
 
-    # emerald - diamond
-    for tier in ["EMERALD", "DIAMOND"]:
+    # emerald - diamond # ADD BACK IN EMERALD LATER
+    for tier in ["DIAMOND"]:
         for division in ["I", "II", "III", "IV"]:
             page = 1
             while len(puuids) < target_players:
@@ -137,8 +137,8 @@ def collect_seed_puuids(queue: str, target_players: int) -> list[str]:
                         puuids.add(puuid)
 
                 page += 1
-                if page > 10: # remove when move to a larger scale
-                    break
+                #if page > 10: # remove when move to a larger scale
+                  #  break
     # masters +
     for tier in ["MASTER", "GRANDMASTER", "CHALLENGER"]:
         for entry in get_apex_entries(queue, tier):
