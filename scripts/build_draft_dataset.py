@@ -4,7 +4,7 @@
 # Samples from NA
 
 from __future__ import annotations
-
+import json
 import os
 import random
 import time
@@ -27,23 +27,24 @@ REALM = "na"            # For latest patch lookup later
 
 QUEUE = "RANKED_SOLO_5x5"
 QUEUE_ID = 420          # Ranked solo/duo id 
-TARGET_MATCHES = 30000    # Change depending on size we want, (upper limit)
-SEED_PLAYERS = 5000     # Number of players to find (size related)
-MATCH_IDS_PER_PLAYER = 30 # How many matches/player
+TARGET_MATCHES = 50   # Change depending on size we want, (upper limit)
+SEED_PLAYERS = 10     # Number of players to find (size related)
+MATCH_IDS_PER_PLAYER = 10 # How many matches/player
 RANDOM_SEED = 42
 
 OUT_DIR = Path("data/processed")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 PLATFORM_HOST = "na1.api.riotgames.com"
-
 REGION_HOST = "americas.api.riotgames.com"
+
+CACHE_PATH = OUT_DIR / "player_rank_cache.json"
+MISSING_WR_VALUE = 0.5
+
+ROLE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
 
 
 def load_api_key() -> str:
-    """ 
-    Get api key from .env
-    """
     load_dotenv()
     api_key = os.getenv("RIOT_API_KEY")
     if not api_key:
@@ -51,50 +52,48 @@ def load_api_key() -> str:
     return api_key
 
 
-API_KEY = load_api_key()    
+API_KEY = load_api_key()
 
-# set api key to default header 
 session = requests.Session()
 session.headers.update({"X-Riot-Token": API_KEY})
 
 
 def riot_get(url: str, params: dict[str, Any] | None = None, max_retries: int = 8) -> Any:
     """
-    Wrapper, Sends a GET request and handles common problems when calling 
+    Wrapper, sends a GET request and handles common problems when calling
     (rate limited/server side issues)
     """
     for attempt in range(max_retries):
         r = session.get(url, params=params, timeout=30)
 
-        if r.status_code == 429: # if rate limited
-            retry_after = int(r.headers.get("Retry-After", "2")) # in seconds
+        if r.status_code == 429:
+            retry_after = int(r.headers.get("Retry-After", "2"))
+            print(f"Rate limited on {url} - sleeping {retry_after + 1}s")
             time.sleep(retry_after + 1)
             continue
-        
-        if 500 <= r.status_code < 600: # if server side issue
-            time.sleep(min(2 ** attempt, 30)) # wait 30s 
+
+        if 500 <= r.status_code < 600:
+            time.sleep(min(2 ** attempt, 30))
             continue
 
         r.raise_for_status()
-        # raw http data to json so can use
         return r.json()
+
     raise RuntimeError(f"Failed after retries: {url}")
 
 
 def get_current_patch(realm: str) -> str:
     """
-    Returns patch in "major.minor" form, e.g. '16.5'
+    Returns patch in 'major.minor' form, e.g. '16.5'
     """
     url = f"https://ddragon.leagueoflegends.com/realms/{realm}.json"
     data = requests.get(url, timeout=30).json()
-    full_version = data["v"]  # e.g. 16.5.1
+    full_version = data["v"]
     return ".".join(full_version.split(".")[:2])
 
-# Functions below are for player entries, need to divide emerald-diamond with master+
-# cuz cringe api 
 
 def get_division_entries(queue: str, tier: str, division: str, page: int) -> list[dict[str, Any]]:
-    """ 
+    """
     Get player data for emerald-diamond players
     """
     url = f"https://{PLATFORM_HOST}/lol/league/v4/entries/{queue}/{tier}/{division}"
@@ -103,7 +102,7 @@ def get_division_entries(queue: str, tier: str, division: str, page: int) -> lis
 
 def get_apex_entries(queue: str, tier: str) -> list[dict[str, Any]]:
     """
-    Get player data for master-chall 
+    Get player data for master/grandmaster/challenger
     """
     endpoint = {
         "MASTER": "masterleagues",
@@ -114,45 +113,64 @@ def get_apex_entries(queue: str, tier: str) -> list[dict[str, Any]]:
     data = riot_get(url)
     return data.get("entries", [])
 
-def collect_seed_puuids(queue: str, target_players: int) -> list[str]:
+
+def collect_seed_puuids(queue: str, target_players: int, cache: dict[str, dict[str, Any]]) -> list[str]:
     """
-    Sample seed players from emerald+ ranked solo/duo 
-    Get the initial set of player ids to use as starting points to find matches
+    Sample seed players from Diamond+ ranked solo/duo and prefill ranked-profile cache.
     """
     rng = random.Random(RANDOM_SEED)
     puuids: set[str] = set()
 
-    # emerald - diamond # ADD BACK IN EMERALD LATER
+    def maybe_cache_entry(entry: dict[str, Any]) -> None:
+        puuid = entry.get("puuid")
+        if not puuid:
+            return
+
+        wins = int(entry.get("wins", 0))
+        losses = int(entry.get("losses", 0))
+        games = wins + losses
+        winrate = wins / games if games > 0 else MISSING_WR_VALUE
+
+        cache[puuid] = {
+            "wins": wins,
+            "losses": losses,
+            "games": games,
+            "winrate": winrate,
+            "tier": entry.get("tier"),
+            "rank": entry.get("rank"),
+            "lp": entry.get("leaguePoints"),
+        }
+
     for tier in ["DIAMOND"]:
         for division in ["I", "II", "III", "IV"]:
             page = 1
             while len(puuids) < target_players:
                 entries = get_division_entries(queue, tier, division, page)
-                if not entries: # if none left
+                if not entries:
                     break
 
                 for entry in entries:
                     puuid = entry.get("puuid")
                     if puuid:
                         puuids.add(puuid)
+                        maybe_cache_entry(entry)
 
                 page += 1
-                #if page > 10: # remove when move to a larger scale
-                  #  break
-    # masters +
+
     for tier in ["MASTER", "GRANDMASTER", "CHALLENGER"]:
         for entry in get_apex_entries(queue, tier):
             puuid = entry.get("puuid")
             if puuid:
                 puuids.add(puuid)
+                maybe_cache_entry(entry)
 
     puuids = list(puuids)
-    # shuffle to mix the ranks although truthfully a bit scuffed
     rng.shuffle(puuids)
     return puuids[:target_players]
 
+
 def get_ranked_match_ids(puuid: str, count: int) -> list[str]:
-    """ 
+    """
     Get solo/duo match ids
     """
     url = f"https://{REGION_HOST}/lol/match/v5/matches/by-puuid/{puuid}/ids"
@@ -167,51 +185,139 @@ def get_ranked_match_ids(puuid: str, count: int) -> list[str]:
 
 def get_match(match_id: str) -> dict[str, Any]:
     """
-    Get match details (champions on each team and winner)
+    Get match details
     """
     url = f"https://{REGION_HOST}/lol/match/v5/matches/{match_id}"
     return riot_get(url)
 
 
-ROLE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+def get_ranked_entries_by_puuid(puuid: str) -> list[dict[str, Any]]:
+    """
+    Get all ranked entries for a player directly by PUUID.
+    """
+    time.sleep(1.25)  # try and prevent hitting rate limits perma
+    url = f"https://{PLATFORM_HOST}/lol/league/v4/entries/by-puuid/{puuid}"
+    return riot_get(url)
 
-def normalize_team_champs(participants: list[dict[str, Any]], team_id: int) -> list[str]:
-    champs_by_role: dict[str, str] = {}
+
+def load_player_cache() -> dict[str, dict[str, Any]]:
+    if CACHE_PATH.exists():
+        try:
+            with open(CACHE_PATH, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if not content:
+                    return {}
+                return json.loads(content)
+        except json.JSONDecodeError:
+            print(f"Warning: cache file {CACHE_PATH} is invalid. Starting with empty cache.")
+            return {}
+    return {}
+
+
+def save_player_cache(cache: dict[str, dict[str, Any]]) -> None:
+    temp_path = CACHE_PATH.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
+    temp_path.replace(CACHE_PATH)
+
+def get_player_ranked_profile(puuid: str, cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """
+    Returns current ranked solo queue stats for a player, cached by PUUID.
+    """
+    if puuid in cache:
+        return cache[puuid]
+
+    try:
+        entries = get_ranked_entries_by_puuid(puuid)
+    except requests.HTTPError:
+        profile = {
+            "wins": 0,
+            "losses": 0,
+            "games": 0,
+            "winrate": MISSING_WR_VALUE,
+            "tier": None,
+            "rank": None,
+            "lp": None,
+        }
+        cache[puuid] = profile
+        return profile
+
+    solo_entry = next(
+        (e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"),
+        None,
+    )
+
+    if solo_entry is None:
+        profile = {
+            "wins": 0,
+            "losses": 0,
+            "games": 0,
+            "winrate": MISSING_WR_VALUE,
+            "tier": None,
+            "rank": None,
+            "lp": None,
+        }
+    else:
+        wins = int(solo_entry.get("wins", 0))
+        losses = int(solo_entry.get("losses", 0))
+        games = wins + losses
+        winrate = wins / games if games > 0 else MISSING_WR_VALUE
+
+        profile = {
+            "wins": wins,
+            "losses": losses,
+            "games": games,
+            "winrate": winrate,
+            "tier": solo_entry.get("tier"),
+            "rank": solo_entry.get("rank"),
+            "lp": solo_entry.get("leaguePoints"),
+        }
+
+    cache[puuid] = profile
+    return profile
+
+
+def normalize_team_participants(participants: list[dict[str, Any]], team_id: int) -> list[dict[str, Any]]:
+    participants_by_role: dict[str, dict[str, Any]] = {}
 
     for p in participants:
         if p["teamId"] != team_id:
             continue
 
         role = p.get("teamPosition", "")
-        champ = p["championName"]
+        if role not in ROLE_ORDER:
+            role = p.get("individualPosition", "")
 
         if role not in ROLE_ORDER:
             raise ValueError(f"Unexpected or missing role {role!r} for team {team_id}")
 
-        if role in champs_by_role:
+        if role in participants_by_role:
             raise ValueError(f"Duplicate role {role} for team {team_id}")
 
-        champs_by_role[role] = champ
+        participants_by_role[role] = p
 
-    missing = [role for role in ROLE_ORDER if role not in champs_by_role]
+    missing = [role for role in ROLE_ORDER if role not in participants_by_role]
     if missing:
         raise ValueError(f"Missing roles for team {team_id}: {missing}")
 
-    return [champs_by_role[role] for role in ROLE_ORDER]
+    return [participants_by_role[role] for role in ROLE_ORDER]
 
 
-def extract_row(match: dict[str, Any], patch_major_minor: str) -> dict[str, Any] | None:
+def extract_row(
+    match: dict[str, Any],
+    patch_major_minor: str,
+    player_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
     info = match["info"]
 
     match_patch = ".".join(info["gameVersion"].split(".")[:2])
-    # removal conditionals:
-    if match_patch != patch_major_minor:
-        return None
+
+   # if match_patch != patch_major_minor:
+     #   return None
 
     if info.get("queueId") != QUEUE_ID:
         return None
 
-    # Remove remakes/very short games 
     if info.get("gameDuration", 0) < 600:
         return None
 
@@ -219,59 +325,100 @@ def extract_row(match: dict[str, Any], patch_major_minor: str) -> dict[str, Any]
     if len(participants) != 10:
         return None
 
-    # 100 for blue 200 for red
-    blue = normalize_team_champs(participants, 100)
-    red = normalize_team_champs(participants, 200)
+    blue_participants = normalize_team_participants(participants, 100)
+    red_participants = normalize_team_participants(participants, 200)
 
     blue_team = next(t for t in info["teams"] if t["teamId"] == 100)
     blue_win = int(bool(blue_team["win"]))
 
+    blue_profiles = [get_player_ranked_profile(p["puuid"], player_cache) for p in blue_participants]
+    red_profiles = [get_player_ranked_profile(p["puuid"], player_cache) for p in red_participants]
+
+    blue_avg_wr = sum(p["winrate"] for p in blue_profiles) / 5
+    red_avg_wr = sum(p["winrate"] for p in red_profiles) / 5
+
     return {
         "match_id": match["metadata"]["matchId"],
         "patch": match_patch,
-        "blue_top": blue[0],
-        "blue_jg": blue[1],
-        "blue_mid": blue[2],
-        "blue_adc": blue[3],
-        "blue_sup": blue[4],
-        "red_top": red[0],
-        "red_jg": red[1],
-        "red_mid": red[2],
-        "red_adc": red[3],
-        "red_sup": red[4],
+
+        "blue_top": blue_participants[0]["championName"],
+        "blue_jg": blue_participants[1]["championName"],
+        "blue_mid": blue_participants[2]["championName"],
+        "blue_adc": blue_participants[3]["championName"],
+        "blue_sup": blue_participants[4]["championName"],
+
+        "red_top": red_participants[0]["championName"],
+        "red_jg": red_participants[1]["championName"],
+        "red_mid": red_participants[2]["championName"],
+        "red_adc": red_participants[3]["championName"],
+        "red_sup": red_participants[4]["championName"],
+
+        "blue_top_wr": blue_profiles[0]["winrate"],
+        "blue_jg_wr": blue_profiles[1]["winrate"],
+        "blue_mid_wr": blue_profiles[2]["winrate"],
+        "blue_adc_wr": blue_profiles[3]["winrate"],
+        "blue_sup_wr": blue_profiles[4]["winrate"],
+
+        "red_top_wr": red_profiles[0]["winrate"],
+        "red_jg_wr": red_profiles[1]["winrate"],
+        "red_mid_wr": red_profiles[2]["winrate"],
+        "red_adc_wr": red_profiles[3]["winrate"],
+        "red_sup_wr": red_profiles[4]["winrate"],
+
+        "blue_top_games": blue_profiles[0]["games"],
+        "blue_jg_games": blue_profiles[1]["games"],
+        "blue_mid_games": blue_profiles[2]["games"],
+        "blue_adc_games": blue_profiles[3]["games"],
+        "blue_sup_games": blue_profiles[4]["games"],
+
+        "red_top_games": red_profiles[0]["games"],
+        "red_jg_games": red_profiles[1]["games"],
+        "red_mid_games": red_profiles[2]["games"],
+        "red_adc_games": red_profiles[3]["games"],
+        "red_sup_games": red_profiles[4]["games"],
+
+        "blue_avg_wr": blue_avg_wr,
+        "red_avg_wr": red_avg_wr,
+        "avg_wr_diff": blue_avg_wr - red_avg_wr,
+
         "blue_win": blue_win,
     }
 
 
 def build_dataset() -> pd.DataFrame:
-    """
-    Build the dataframe 
-    """
     random.seed(RANDOM_SEED)
 
     current_patch = get_current_patch(REALM)
     print(f"Current patch: {current_patch}")
 
+    player_cache = load_player_cache()
+    print(f"Loaded {len(player_cache)} cached player ranked profiles")
+
     seed_puuids = collect_seed_puuids(
         queue=QUEUE,
         target_players=SEED_PLAYERS,
+        cache=player_cache,
     )
-    print(f"Collected {len(seed_puuids)} NA Emerald+ seed players")
+    print(f"Collected {len(seed_puuids)} NA Diamond+ seed players")
 
-    candidate_match_ids: set[str] = set()
+    candidate_match_ids: list[str] = []
+    seen_candidate_ids: set[str] = set()
 
     for i, puuid in enumerate(seed_puuids, start=1):
         try:
             ids = get_ranked_match_ids(puuid, MATCH_IDS_PER_PLAYER)
-        except requests.HTTPError:
+        except (requests.HTTPError, KeyError, ValueError) as e:
+            print(f"Skipping {match_id}: {type(e).__name__}: {e}")
             continue
 
-        candidate_match_ids.update(ids)
+        for mid in ids:
+            if mid not in seen_candidate_ids:
+                seen_candidate_ids.add(mid)
+                candidate_match_ids.append(mid)
 
         if i % 25 == 0 or i == len(seed_puuids):
             print(f"[seed players] {i}/{len(seed_puuids)} -> {len(candidate_match_ids)} unique match ids")
 
-        # oversample because some matches will be filtered out later
         if len(candidate_match_ids) >= int(TARGET_MATCHES * 1.3):
             break
 
@@ -285,20 +432,43 @@ def build_dataset() -> pd.DataFrame:
             continue
         seen_matches.add(match_id)
 
+        if j % 10 == 0 or j <= 5:
+            print(f"Processing match {j}/{len(candidate_match_ids)}: {match_id}")
         try:
             match = get_match(match_id)
-            row = extract_row(match, current_patch)
-        except (requests.HTTPError, KeyError, ValueError):
+            if j <= 5:
+                info = match["info"]
+                print("DEBUG")
+                print("patch:", ".".join(info["gameVersion"].split(".")[:2]))
+                print("current_patch:", current_patch)
+                print("queueId:", info.get("queueId"))
+                print("duration:", info.get("gameDuration"))
+                print("teamPosition:", [p.get("teamPosition", "") for p in info["participants"]])
+                print("individualPosition:", [p.get("individualPosition", "") for p in info["participants"]])
+            row = extract_row(match, current_patch, player_cache)
+            if row is None:
+                print(f"Row is None for {match_id}")
+        except (requests.HTTPError, KeyError, ValueError) as e:
+            print(f"Skipping {match_id}: {type(e).__name__}: {e}")
             continue
 
         if row is not None:
             rows.append(row)
+            print(f"APPENDED row for {match_id} | total rows = {len(rows)}")
+        else:
+            print(f"ROW NONE for {match_id}")
 
         if j % 100 == 0 or j == len(candidate_match_ids):
             print(f"[match details] {j}/{len(candidate_match_ids)} -> {len(rows)} usable rows")
 
+        if j % 200 == 0:
+            save_player_cache(player_cache)
+            print(f"Saved player cache with {len(player_cache)} entries")
+
         if len(rows) >= TARGET_MATCHES:
             break
+
+    save_player_cache(player_cache)
 
     df = pd.DataFrame(rows)
 
@@ -310,7 +480,7 @@ def build_dataset() -> pd.DataFrame:
 
 if __name__ == "__main__":
     df = build_dataset()
-    out_path = OUT_DIR / f"draft_dataset_na_emeraldplus_latest_patch_{len(df)}.csv"
+    out_path = OUT_DIR / f"draft_dataset_na_diamondplus_latest_patch_{len(df)}.csv"
     df.to_csv(out_path, index=False)
     print(f"Saved {len(df)} rows to {out_path}")
     print(df.head())

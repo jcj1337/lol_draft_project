@@ -20,15 +20,15 @@ OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # hyperparams
-BATCH_SIZE =8
-EMBED_DIM = 32
+BATCH_SIZE =16
+EMBED_DIM = 16
 NUM_HEADS = 2
-NUM_LAYERS = 2
-FF_DIM = 64
+NUM_LAYERS = 1
+FF_DIM = 32
 DROPOUT = 0.2
-MLP_HIDDEN_DIM = 64
+MLP_HIDDEN_DIM = 32
 LEARNING_RATE = 0.001
-EPOCHS = 5
+EPOCHS = 20
 SEED = 42
 # asdf asd f
 TRAIN_SUBSET_ROWS = 240
@@ -55,9 +55,9 @@ def take_subset(df: pd.DataFrame, n_rows: int) -> pd.DataFrame:
 
 def split_dataframe(
     df: pd.DataFrame,
-    train_frac: float = 0.70,
-    val_frac: float = 0.15,
-    test_frac: float = 0.15,
+    train_frac: float = 0.8,
+    val_frac: float = 0.1,
+    test_frac: float = 0.1,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if abs(train_frac + val_frac + test_frac - 1.0) > 1e-9:
@@ -269,7 +269,7 @@ def main() -> None:
     ).to(device)
 
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay = 0.001)
 
     train_losses: list[float] = []
     val_losses: list[float] = []
