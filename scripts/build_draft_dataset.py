@@ -27,9 +27,9 @@ REALM = "na"            # For latest patch lookup later
 
 QUEUE = "RANKED_SOLO_5x5"
 QUEUE_ID = 420          # Ranked solo/duo id 
-TARGET_MATCHES = 50   # Change depending on size we want, (upper limit)
-SEED_PLAYERS = 10     # Number of players to find (size related)
-MATCH_IDS_PER_PLAYER = 10 # How many matches/player
+TARGET_MATCHES = 15000  # Change depending on size we want, (upper limit)
+SEED_PLAYERS = 2000    # Number of players to find (size related)
+MATCH_IDS_PER_PLAYER = 20 # How many matches/player
 RANDOM_SEED = 42
 
 OUT_DIR = Path("data/processed")
@@ -173,6 +173,7 @@ def get_ranked_match_ids(puuid: str, count: int) -> list[str]:
     """
     Get solo/duo match ids
     """
+    time.sleep(1.25)
     url = f"https://{REGION_HOST}/lol/match/v5/matches/by-puuid/{puuid}/ids"
     params = {
         "start": 0,
@@ -384,10 +385,19 @@ def extract_row(
         "blue_win": blue_win,
     }
 
+def format_seconds(seconds: float) -> str:
+    """
+    time format for logging 
+    """
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 def build_dataset() -> pd.DataFrame:
     random.seed(RANDOM_SEED)
-
+    start_time = time.time()
     current_patch = get_current_patch(REALM)
     print(f"Current patch: {current_patch}")
 
@@ -408,7 +418,6 @@ def build_dataset() -> pd.DataFrame:
         try:
             ids = get_ranked_match_ids(puuid, MATCH_IDS_PER_PLAYER)
         except (requests.HTTPError, KeyError, ValueError) as e:
-            print(f"Skipping {match_id}: {type(e).__name__}: {e}")
             continue
 
         for mid in ids:
@@ -432,34 +441,37 @@ def build_dataset() -> pd.DataFrame:
             continue
         seen_matches.add(match_id)
 
-        if j % 10 == 0 or j <= 5:
+        if j % 50 == 0 or j <= 5:
             print(f"Processing match {j}/{len(candidate_match_ids)}: {match_id}")
         try:
             match = get_match(match_id)
-            if j <= 5:
-                info = match["info"]
-                print("DEBUG")
-                print("patch:", ".".join(info["gameVersion"].split(".")[:2]))
-                print("current_patch:", current_patch)
-                print("queueId:", info.get("queueId"))
-                print("duration:", info.get("gameDuration"))
-                print("teamPosition:", [p.get("teamPosition", "") for p in info["participants"]])
-                print("individualPosition:", [p.get("individualPosition", "") for p in info["participants"]])
             row = extract_row(match, current_patch, player_cache)
-            if row is None:
-                print(f"Row is None for {match_id}")
         except (requests.HTTPError, KeyError, ValueError) as e:
             print(f"Skipping {match_id}: {type(e).__name__}: {e}")
             continue
 
         if row is not None:
             rows.append(row)
-            print(f"APPENDED row for {match_id} | total rows = {len(rows)}")
-        else:
-            print(f"ROW NONE for {match_id}")
 
         if j % 100 == 0 or j == len(candidate_match_ids):
-            print(f"[match details] {j}/{len(candidate_match_ids)} -> {len(rows)} usable rows")
+            elapsed = time.time() - start_time
+            matches_per_sec = j / elapsed if elapsed > 0 else 0.0
+            rows_per_sec = len(rows) / elapsed if elapsed > 0 else 0.0
+
+            remaining_matches = len(candidate_match_ids) - j
+            eta_by_match_scan = remaining_matches / matches_per_sec if matches_per_sec > 0 else float("inf")
+
+            remaining_rows = max(TARGET_MATCHES - len(rows), 0)
+            eta_by_row_rate = remaining_rows / rows_per_sec if rows_per_sec > 0 else float("inf")
+
+            print(
+                f"[match details] {j}/{len(candidate_match_ids)} -> {len(rows)} usable rows | "
+                f"elapsed={format_seconds(elapsed)} | "
+                f"scan_rate={matches_per_sec:.2f} matches/s | "
+                f"row_rate={rows_per_sec:.2f} rows/s | "
+                f"eta_scan={format_seconds(eta_by_match_scan) if eta_by_match_scan != float('inf') else 'N/A'} | "
+                f"eta_rows={format_seconds(eta_by_row_rate) if eta_by_row_rate != float('inf') else 'N/A'}"
+            )
 
         if j % 200 == 0:
             save_player_cache(player_cache)
