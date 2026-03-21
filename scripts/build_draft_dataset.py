@@ -38,9 +38,9 @@ SHARDS = [
 
 QUEUE = "RANKED_SOLO_5x5"
 QUEUE_ID = 420          # Ranked solo/duo id
-TARGET_MATCHES = 100000 # Total target across all shards combined
+TARGET_MATCHES = 110000 # Total target across all shards combined
 SEED_PLAYERS = 2500    # Number of players/shard to find (size related)
-MATCH_IDS_PER_PLAYER = 20  # How many matches/player
+MATCH_IDS_PER_PLAYER = 30  # How many matches/player
 RANDOM_SEED = 42
 ALLOWED_PATCHES = {"16.5", "16.6"}
 OUT_DIR = Path("data/processed")
@@ -387,8 +387,8 @@ def extract_row(
     match_patch = ".".join(info["gameVersion"].split(".")[:2])
 
     # removal conditionals:
-    if match_patch not in ALLOWED_PATCHES:
-        return None
+    #if match_patch not in ALLOWED_PATCHES:
+      #  return None
 
     if info.get("queueId") != QUEUE_ID:
         return None
