@@ -30,9 +30,20 @@ MLP_HIDDEN_DIM = 32
 LEARNING_RATE = 0.001
 EPOCHS = 20
 SEED = 42
-# asdf asd f
-TRAIN_SUBSET_ROWS = 240
+#test
+#TRAIN_SUBSET_ROWS = 240
+
 # don't change these ever
+NUMERIC_FEATURE_COLS = [
+    "team_a_avg_wr",
+    "team_b_avg_wr",
+    "avg_wr_diff",
+    "top_wr_diff",
+    "jg_wr_diff",
+    "mid_wr_diff",
+    "adc_wr_diff",
+    "sup_wr_diff",
+]
 TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
 TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
 LABEL_COL = "team_a_win"
@@ -88,6 +99,27 @@ def split_dataframe(
     test_df = df.iloc[test_idx].reset_index(drop=True)
     return train_df, val_df, test_df
 
+def standardize_numeric_features(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_cols: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    train_df = train_df.copy()
+    val_df = val_df.copy()
+    test_df = test_df.copy()
+
+    mean = train_df[feature_cols].mean()
+    std = train_df[feature_cols].std()
+
+    # avoid divide-by-zero 
+    std = std.replace(0, 1.0)
+
+    train_df[feature_cols] = (train_df[feature_cols] - mean) / std
+    val_df[feature_cols] = (val_df[feature_cols] - mean) / std
+    test_df[feature_cols] = (test_df[feature_cols] - mean) / std
+
+    return train_df, val_df, test_df, mean, std
 
 def make_loader(df: pd.DataFrame, champ_to_id: dict[str, int], batch_size: int, shuffle: bool) -> DataLoader:
     dataset = DraftDataset(df, champ_to_id)
@@ -116,11 +148,12 @@ def train_one_epoch(
     for batch in loader:
         champ_ids = batch["champ_ids"].to(device)
         team_ids = batch["team_ids"].to(device)
+        role_ids = batch["role_ids"].to(device)
+        numeric_features = batch["numeric_features"].to(device)
         labels = batch["label"].to(device)
 
         optimizer.zero_grad()
-        role_ids = batch["role_ids"].to(device)
-        logits = model(champ_ids, team_ids, role_ids)
+        logits = model(champ_ids, team_ids, role_ids, numeric_features)
         loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
@@ -147,10 +180,11 @@ def evaluate(
     for batch in loader:
         champ_ids = batch["champ_ids"].to(device)
         team_ids = batch["team_ids"].to(device)
+        role_ids = batch["role_ids"].to(device)
+        numeric_features = batch["numeric_features"].to(device)
         labels = batch["label"].to(device)
 
-        role_ids = batch["role_ids"].to(device)
-        logits = model(champ_ids, team_ids, role_ids)
+        logits = model(champ_ids, team_ids, role_ids, numeric_features)
         loss = criterion(logits, labels)
 
         probs = torch.sigmoid(logits)
@@ -186,6 +220,12 @@ def print_example_predictions(
         team_b = [str(row[col]).strip() for col in TEAM_B_COLS]
         label = int(row[LABEL_COL])
 
+        numeric_features = torch.tensor(
+            [[float(row[col]) for col in NUMERIC_FEATURE_COLS]],
+            dtype=torch.float32,
+            device=device,
+        )
+
         champ_ids = torch.tensor(
     [[champ_to_id[c] for c in team_a + team_b]],
     dtype=torch.long,
@@ -202,7 +242,7 @@ def print_example_predictions(
             device=device,
         )
 
-        logit = model(champ_ids, team_ids, role_ids)
+        logit = model(champ_ids, team_ids, role_ids, numeric_features)
         prob = torch.sigmoid(logit).item()
         pred = int(prob >= 0.5)
 
@@ -242,10 +282,12 @@ def main() -> None:
     champ_to_id = build_champion_ids(df)
 
     train_df, val_df, test_df = split_dataframe(df, 0.70, 0.15, 0.15, seed=SEED)
-
+    train_df, val_df, test_df, numeric_mean, numeric_std = standardize_numeric_features(
+    train_df, val_df, test_df, NUMERIC_FEATURE_COLS
+    )
     # tester asdf 
-    if TRAIN_SUBSET_ROWS is not None:
-        train_df = take_subset(train_df, TRAIN_SUBSET_ROWS)
+    #if TRAIN_SUBSET_ROWS is not None:
+    #    train_df = take_subset(train_df, TRAIN_SUBSET_ROWS)
 
     # tester end 
     print(f"Total rows: {len(df)}")
@@ -266,7 +308,8 @@ def main() -> None:
         ff_dim=FF_DIM,
         dropout=DROPOUT,
         mlp_hidden_dim=MLP_HIDDEN_DIM,
-    ).to(device)
+        num_numeric_features=len(NUMERIC_FEATURE_COLS),
+    ) .to(device)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay = 0.001)

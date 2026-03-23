@@ -7,17 +7,19 @@ from torch import nn
 class DraftTransformer(nn.Module):
     """
     Input:
-        champ_ids: [B, 10]
-        team_ids:  [B, 10]   (0 for team A, 1 for team B)
-        role_ids:  [B, 10]   (0=top, 1=jg, 2=mid, 3=adc, 4=sup)
+        champ_ids:         [B, 10]
+        team_ids:          [B, 10]   (0 for team A, 1 for team B)
+        role_ids:          [B, 10]   (0=top, 1=jg, 2=mid, 3=adc, 4=sup)
+        numeric_features:  [B, F]
 
     Output:
-        logits:    [B]
+        logits:            [B]
     """
 
     def __init__(
         self,
         num_champions: int,
+        num_numeric_features: int,
         embed_dim: int = 64,
         num_heads: int = 4,
         num_layers: int = 2,
@@ -56,9 +58,11 @@ class DraftTransformer(nn.Module):
             num_layers=num_layers,
         )
 
+        combined_dim = embed_dim + num_numeric_features
+
         self.head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, mlp_hidden_dim),
+            nn.LayerNorm(combined_dim),
+            nn.Linear(combined_dim, mlp_hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(mlp_hidden_dim, 1),
@@ -69,6 +73,7 @@ class DraftTransformer(nn.Module):
         champ_ids: torch.Tensor,
         team_ids: torch.Tensor,
         role_ids: torch.Tensor,
+        numeric_features: torch.Tensor,
     ) -> torch.Tensor:
         champ_emb = self.champion_embedding(champ_ids)   # [B, 10, D]
         team_emb = self.team_embedding(team_ids)         # [B, 10, D]
@@ -77,7 +82,8 @@ class DraftTransformer(nn.Module):
         x = champ_emb + team_emb + role_emb
         x = self.encoder(x)
 
-        pooled = x.mean(dim=1)
-        logits = self.head(pooled).squeeze(-1)
+        pooled = x.mean(dim=1)  # [B, D]
+        combined = torch.cat([pooled, numeric_features], dim=1)  # [B, D + F]
+        logits = self.head(combined).squeeze(-1)
 
         return logits

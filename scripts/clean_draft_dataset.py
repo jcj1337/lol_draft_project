@@ -28,15 +28,22 @@ REQUIRED_COLS = [
     *RED_GAMES_COLS,
 ]
 
+NUMERIC_COLS = [
+    "blue_win",
+    "blue_avg_wr",
+    "red_avg_wr",
+    "avg_wr_diff",
+    *BLUE_WR_COLS,
+    *RED_WR_COLS,
+    *BLUE_GAMES_COLS,
+    *RED_GAMES_COLS,
+]
+
 
 def find_latest_input_csv(data_dir: Path) -> Path:
     candidates = list(data_dir.glob("draft_dataset*.csv"))
-
     if not candidates:
-        raise FileNotFoundError(
-            f"No matching draft dataset CSVs found in {data_dir.resolve()}"
-        )
-
+        raise FileNotFoundError(f"No matching draft dataset CSVs found in {data_dir.resolve()}")
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
@@ -45,7 +52,31 @@ def make_output_path(input_csv: Path) -> Path:
     return PROCESSED_DIR / f"{input_csv.stem}_cleaned.csv"
 
 
+def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure correct data types 
+    """
+    df = df.copy()
+
+    # strip champ strings
+    for col in BLUE_CHAMP_COLS + RED_CHAMP_COLS + ["match_id", "patch"]:
+        df[col] = df[col].astype(str).str.strip()
+
+    # numeric coercion
+    for col in NUMERIC_COLS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # games should be ints
+    for col in BLUE_GAMES_COLS + RED_GAMES_COLS:
+        df[col] = df[col].astype("Int64")
+
+    return df
+
+
 def validate_input(df: pd.DataFrame) -> None:
+    """
+    Validation function probably useless i cant lie
+    """
     missing = [col for col in REQUIRED_COLS if col not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -53,23 +84,35 @@ def validate_input(df: pd.DataFrame) -> None:
     if df.empty:
         raise ValueError("Input CSV is empty.")
 
+    if df[NUMERIC_COLS].isna().any().any():
+        bad_cols = [col for col in NUMERIC_COLS if df[col].isna().any()]
+        raise ValueError(f"Found non-numeric or missing values in numeric columns: {bad_cols}")
+
     if not df["blue_win"].isin([0, 1]).all():
         raise ValueError("blue_win must only contain 0/1 values.")
 
     for cols, side in [(BLUE_CHAMP_COLS, "blue"), (RED_CHAMP_COLS, "red")]:
         if df[cols].isna().any().any():
             raise ValueError(f"Found missing champion names on {side} side.")
+        if (df[cols] == "").any().any():
+            raise ValueError(f"Found blank champion names on {side} side.")
 
-    for cols, side in [(BLUE_WR_COLS, "blue"), (RED_WR_COLS, "red")]:
-        if df[cols].isna().any().any():
-            raise ValueError(f"Found missing win-rate values on {side} side.")
+    # reasonable bounds
+    wr_cols = BLUE_WR_COLS + RED_WR_COLS + ["blue_avg_wr", "red_avg_wr"]
+    for col in wr_cols:
+        if ((df[col] < 0) | (df[col] > 1)).any():
+            raise ValueError(f"Win-rate column out of [0,1] range: {col}")
 
-    for cols, side in [(BLUE_GAMES_COLS, "blue"), (RED_GAMES_COLS, "red")]:
-        if df[cols].isna().any().any():
-            raise ValueError(f"Found missing games-played values on {side} side.")
+    games_cols = BLUE_GAMES_COLS + RED_GAMES_COLS
+    for col in games_cols:
+        if (df[col] < 0).any():
+            raise ValueError(f"Games-played column has negative values: {col}")
 
 
 def canonicalize_row(row: pd.Series) -> dict:
+    """
+    Go from blue-red to team a team b 
+    """
     blue_team = tuple(str(row[col]).strip() for col in BLUE_CHAMP_COLS)
     red_team = tuple(str(row[col]).strip() for col in RED_CHAMP_COLS)
     blue_win = int(row["blue_win"])
@@ -111,6 +154,16 @@ def canonicalize_row(row: pd.Series) -> dict:
         team_b_avg_wr = blue_avg_wr
         team_a_win = 1 - blue_win
 
+    top_wr_diff = team_a_wr[0] - team_b_wr[0]
+    jg_wr_diff = team_a_wr[1] - team_b_wr[1]
+    mid_wr_diff = team_a_wr[2] - team_b_wr[2]
+    adc_wr_diff = team_a_wr[3] - team_b_wr[3]
+    sup_wr_diff = team_a_wr[4] - team_b_wr[4]
+
+    team_a_avg_games = sum(team_a_games) / 5
+    team_b_avg_games = sum(team_b_games) / 5
+    avg_games_diff = team_a_avg_games - team_b_avg_games
+
     return {
         "match_id": row["match_id"],
         "patch": row["patch"],
@@ -127,6 +180,7 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_adc": team_b[3],
         "team_b_sup": team_b[4],
 
+        # raw role WRs
         "team_a_top_wr": team_a_wr[0],
         "team_a_jg_wr": team_a_wr[1],
         "team_a_mid_wr": team_a_wr[2],
@@ -139,6 +193,14 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_adc_wr": team_b_wr[3],
         "team_b_sup_wr": team_b_wr[4],
 
+        # role WR diffs
+        "top_wr_diff": top_wr_diff,
+        "jg_wr_diff": jg_wr_diff,
+        "mid_wr_diff": mid_wr_diff,
+        "adc_wr_diff": adc_wr_diff,
+        "sup_wr_diff": sup_wr_diff,
+
+        # games played
         "team_a_top_games": team_a_games[0],
         "team_a_jg_games": team_a_games[1],
         "team_a_mid_games": team_a_games[2],
@@ -151,6 +213,11 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_adc_games": team_b_games[3],
         "team_b_sup_games": team_b_games[4],
 
+        "team_a_avg_games": team_a_avg_games,
+        "team_b_avg_games": team_b_avg_games,
+        "avg_games_diff": avg_games_diff,
+
+        # team WR summaries
         "team_a_avg_wr": team_a_avg_wr,
         "team_b_avg_wr": team_b_avg_wr,
         "avg_wr_diff": team_a_avg_wr - team_b_avg_wr,
@@ -165,15 +232,20 @@ def main() -> None:
 
     df = pd.read_csv(input_csv)
     validate_input(df)
+    df = coerce_types(df)
+    validate_input(df)
 
     df = df.drop_duplicates(subset=["match_id"]).reset_index(drop=True)
-    out_df = pd.DataFrame([canonicalize_row(row) for _, row in df.iterrows()])
+
+    rows = [canonicalize_row(row) for _, row in df.iterrows()]
+    out_df = pd.DataFrame(rows)
 
     out_df.to_csv(output_csv, index=False)
 
     print(f"Input file:  {input_csv.resolve()}")
     print(f"Output file: {output_csv.resolve()}")
     print(f"Saved {len(out_df)} cleaned rows")
+    print(out_df.head())
 
 
 if __name__ == "__main__":

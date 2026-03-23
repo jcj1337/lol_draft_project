@@ -10,6 +10,16 @@ from torch.utils.data import Dataset, DataLoader
 
 TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
 TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
+NUMERIC_FEATURE_COLS = [
+    "team_a_avg_wr",
+    "team_b_avg_wr",
+    "avg_wr_diff",
+    "top_wr_diff",
+    "jg_wr_diff",
+    "mid_wr_diff",
+    "adc_wr_diff",
+    "sup_wr_diff",
+]
 ALL_CHAMP_COLS = TEAM_A_COLS + TEAM_B_COLS
 LABEL_COL = "team_a_win"
 ROLE_IDS = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4]
@@ -55,11 +65,16 @@ class DraftDataset(Dataset):
         team_ids = [0] * 5 + [1] * 5
 
         label = int(row[LABEL_COL])
+        numeric_features = torch.tensor(
+            [float(row[col]) for col in NUMERIC_FEATURE_COLS],
+            dtype=torch.float32,
+        )
 
         return {
             "champ_ids": torch.tensor(champ_ids, dtype=torch.long),  # [10]
             "team_ids": torch.tensor(team_ids, dtype=torch.long),    # [10]
             "role_ids": torch.tensor(role_ids, dtype=torch.long),
+            "numeric_features": numeric_features,
             "label": torch.tensor(label, dtype=torch.float32),       # scalar
         }
 
