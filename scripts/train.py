@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import random
-
+from xml.parsers.expat import model
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
@@ -22,27 +25,32 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # hyperparams
 BATCH_SIZE =16
 EMBED_DIM = 16
-NUM_HEADS = 4
+NUM_HEADS = 2
 NUM_LAYERS = 2
 FF_DIM = 32
 DROPOUT = 0.2
 MLP_HIDDEN_DIM = 32
-LEARNING_RATE = 0.01
-EPOCHS = 5
+LEARNING_RATE = 0.001
+EPOCHS = 3
 SEED = 42
 #test
 #TRAIN_SUBSET_ROWS = 240
 
 # don't change these ever
 NUMERIC_FEATURE_COLS = [
-    "team_a_avg_wr",
-    "team_b_avg_wr",
-    "avg_wr_diff",
     "top_wr_diff",
     "jg_wr_diff",
     "mid_wr_diff",
     "adc_wr_diff",
     "sup_wr_diff",
+    "avg_wr_diff",
+    "top_low_games_flag",
+    "jg_low_games_flag",
+    "mid_low_games_flag",
+    "adc_low_games_flag",
+    "sup_low_games_flag",
+    "any_low_games_flag",
+    "low_games_count",
 ]
 TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
 TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
@@ -268,11 +276,146 @@ def plot_losses(train_losses: list[float], val_losses: list[float], out_path: Pa
     plt.savefig(out_path)
     plt.close()
 
+# Calibration functions 
+def collect_probs_and_labels(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    model.eval()
+
+    all_probs = []
+    all_labels = []
+
+    with torch.no_grad():
+        for batch in loader:
+            champ_ids = batch["champ_ids"].to(device)
+            team_ids = batch["team_ids"].to(device)
+            role_ids = batch["role_ids"].to(device)
+            numeric_features = batch["numeric_features"].to(device)
+            labels = batch["label"].float().to(device)
+
+            logits = model(champ_ids, team_ids, role_ids, numeric_features)
+            probs = torch.sigmoid(logits)
+
+            all_probs.append(probs.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
+    probs_np = np.concatenate(all_probs)
+    labels_np = np.concatenate(all_labels)
+
+    return probs_np, labels_np
+
+
+def make_calibration_table(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    bin_width: float = 0.05,
+) -> pd.DataFrame:
+    if len(probs) != len(labels):
+        raise ValueError("probs and labels must have the same length.")
+
+    edges = np.arange(0.0, 1.0 + bin_width, bin_width)
+    edges[-1] = 1.0  # avoid float weirdness
+
+    rows = []
+
+    for i in range(len(edges) - 1):
+        left = edges[i]
+        right = edges[i + 1]
+
+        if i == len(edges) - 2:
+            mask = (probs >= left) & (probs <= right)
+        else:
+            mask = (probs >= left) & (probs < right)
+
+        count = int(mask.sum())
+
+        if count == 0:
+            rows.append({
+                "bucket_left": left,
+                "bucket_right": right,
+                "count": 0,
+                "avg_pred_prob": np.nan,
+                "actual_win_rate": np.nan,
+            })
+        else:
+            bucket_probs = probs[mask]
+            bucket_labels = labels[mask]
+
+            rows.append({
+                "bucket_left": left,
+                "bucket_right": right,
+                "count": count,
+                "avg_pred_prob": float(bucket_probs.mean()),
+                "actual_win_rate": float(bucket_labels.mean()),
+            })
+
+    table = pd.DataFrame(rows)
+    table["bucket"] = table.apply(
+        lambda r: f"{int(r['bucket_left'] * 100):02d}-{int(r['bucket_right'] * 100):02d}%",
+        axis=1,
+    )
+
+    return table[
+        ["bucket", "count", "avg_pred_prob", "actual_win_rate"]
+    ]
+
+
+def plot_calibration_table(
+    calibration_df: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    plot_df = calibration_df.dropna().copy()
+
+    if plot_df.empty:
+        print("No non-empty calibration buckets to plot.")
+        return
+
+    x = plot_df["avg_pred_prob"].to_numpy()
+    y = plot_df["actual_win_rate"].to_numpy()
+
+    plt.figure(figsize=(6, 6))
+    plt.plot([0, 1], [0, 1], linestyle="--", label="Perfect calibration")
+    plt.plot(x, y, marker="o", label="Model")
+    plt.xlabel("Average predicted probability")
+    plt.ylabel("Actual win rate")
+    plt.title("Calibration plot")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def print_calibration_report(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    output_csv_path: Path,
+    output_plot_path: Path,
+    bin_width: float = 0.05,
+) -> None:
+    probs, labels = collect_probs_and_labels(model, loader, device)
+    calibration_df = make_calibration_table(probs, labels, bin_width=bin_width)
+
+    print("\nCalibration table:")
+    print(calibration_df.to_string(index=False))
+
+    calibration_df.to_csv(output_csv_path, index=False)
+    plot_calibration_table(calibration_df, output_plot_path)
+
+    print(f"\nSaved calibration table to: {output_csv_path.resolve()}")
+    print(f"Saved calibration plot to:  {output_plot_path.resolve()}")
 
 def main() -> None:
     set_seed(SEED)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     csv_path = find_latest_cleaned_csv(DATA_DIR)
@@ -348,7 +491,17 @@ def main() -> None:
     loss_plot_path = OUTPUT_DIR / "loss_curve.png"
     plot_losses(train_losses, val_losses, loss_plot_path)
     print(f"Saved loss curve to: {loss_plot_path.resolve()}")
+    calibration_csv_path = OUTPUT_DIR / "test_calibration_5pct.csv"
+    calibration_plot_path = OUTPUT_DIR / "test_calibration_5pct.png"
 
+    print_calibration_report(
+        model=model,
+        loader=test_loader,
+        device=device,
+        output_csv_path=calibration_csv_path,
+        output_plot_path=calibration_plot_path,
+        bin_width=0.05,
+    )
     print_example_predictions(model, test_df, champ_to_id, device, num_examples=5)
 
 

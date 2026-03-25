@@ -110,9 +110,6 @@ def validate_input(df: pd.DataFrame) -> None:
 
 
 def canonicalize_row(row: pd.Series) -> dict:
-    """
-    Go from blue-red to team a team b 
-    """
     blue_team = tuple(str(row[col]).strip() for col in BLUE_CHAMP_COLS)
     red_team = tuple(str(row[col]).strip() for col in RED_CHAMP_COLS)
     blue_win = int(row["blue_win"])
@@ -154,18 +151,122 @@ def canonicalize_row(row: pd.Series) -> dict:
         team_b_avg_wr = blue_avg_wr
         team_a_win = 1 - blue_win
 
+    # existing raw WR diffs
     top_wr_diff = team_a_wr[0] - team_b_wr[0]
     jg_wr_diff = team_a_wr[1] - team_b_wr[1]
     mid_wr_diff = team_a_wr[2] - team_b_wr[2]
     adc_wr_diff = team_a_wr[3] - team_b_wr[3]
     sup_wr_diff = team_a_wr[4] - team_b_wr[4]
 
+    # games summaries
     team_a_avg_games = sum(team_a_games) / 5
     team_b_avg_games = sum(team_b_games) / 5
     avg_games_diff = team_a_avg_games - team_b_avg_games
 
+    # role-wise games diffs
+    top_games_diff = team_a_games[0] - team_b_games[0]
+    jg_games_diff = team_a_games[1] - team_b_games[1]
+    mid_games_diff = team_a_games[2] - team_b_games[2]
+    adc_games_diff = team_a_games[3] - team_b_games[3]
+    sup_games_diff = team_a_games[4] - team_b_games[4]
+
+    # role-wise min/max games
+    top_min_games = min(team_a_games[0], team_b_games[0])
+    jg_min_games = min(team_a_games[1], team_b_games[1])
+    mid_min_games = min(team_a_games[2], team_b_games[2])
+    adc_min_games = min(team_a_games[3], team_b_games[3])
+    sup_min_games = min(team_a_games[4], team_b_games[4])
+
+    top_max_games = max(team_a_games[0], team_b_games[0])
+    jg_max_games = max(team_a_games[1], team_b_games[1])
+    mid_max_games = max(team_a_games[2], team_b_games[2])
+    adc_max_games = max(team_a_games[3], team_b_games[3])
+    sup_max_games = max(team_a_games[4], team_b_games[4])
+
+    # low-games flags
+    LOW_GAMES_THRESHOLD = 20
+
+    team_a_top_low_games = int(team_a_games[0] < LOW_GAMES_THRESHOLD)
+    team_a_jg_low_games = int(team_a_games[1] < LOW_GAMES_THRESHOLD)
+    team_a_mid_low_games = int(team_a_games[2] < LOW_GAMES_THRESHOLD)
+    team_a_adc_low_games = int(team_a_games[3] < LOW_GAMES_THRESHOLD)
+    team_a_sup_low_games = int(team_a_games[4] < LOW_GAMES_THRESHOLD)
+
+    team_b_top_low_games = int(team_b_games[0] < LOW_GAMES_THRESHOLD)
+    team_b_jg_low_games = int(team_b_games[1] < LOW_GAMES_THRESHOLD)
+    team_b_mid_low_games = int(team_b_games[2] < LOW_GAMES_THRESHOLD)
+    team_b_adc_low_games = int(team_b_games[3] < LOW_GAMES_THRESHOLD)
+    team_b_sup_low_games = int(team_b_games[4] < LOW_GAMES_THRESHOLD)
+
+    top_low_games_flag = int(top_min_games < LOW_GAMES_THRESHOLD)
+    jg_low_games_flag = int(jg_min_games < LOW_GAMES_THRESHOLD)
+    mid_low_games_flag = int(mid_min_games < LOW_GAMES_THRESHOLD)
+    adc_low_games_flag = int(adc_min_games < LOW_GAMES_THRESHOLD)
+    sup_low_games_flag = int(sup_min_games < LOW_GAMES_THRESHOLD)
+
+    any_low_games_flag = int(
+        top_low_games_flag
+        or jg_low_games_flag
+        or mid_low_games_flag
+        or adc_low_games_flag
+        or sup_low_games_flag
+    )
+
+    low_games_count = (
+        team_a_top_low_games + team_a_jg_low_games + team_a_mid_low_games + team_a_adc_low_games + team_a_sup_low_games
+        + team_b_top_low_games + team_b_jg_low_games + team_b_mid_low_games + team_b_adc_low_games + team_b_sup_low_games
+    )
+
+    min_games_in_match = min(*team_a_games, *team_b_games)
+    max_games_in_match = max(*team_a_games, *team_b_games)
+
+    # smoothed WRs
+    # shrink low-sample WRs toward 0.5
+    SMOOTHING_ALPHA = 20.0
+
+    def smooth_wr(wr: float, games: int, alpha: float = SMOOTHING_ALPHA) -> float:
+        approx_wins = wr * games
+        return (approx_wins + alpha * 0.5) / (games + alpha)
+
+    team_a_top_smoothed_wr = smooth_wr(team_a_wr[0], team_a_games[0])
+    team_a_jg_smoothed_wr = smooth_wr(team_a_wr[1], team_a_games[1])
+    team_a_mid_smoothed_wr = smooth_wr(team_a_wr[2], team_a_games[2])
+    team_a_adc_smoothed_wr = smooth_wr(team_a_wr[3], team_a_games[3])
+    team_a_sup_smoothed_wr = smooth_wr(team_a_wr[4], team_a_games[4])
+
+    team_b_top_smoothed_wr = smooth_wr(team_b_wr[0], team_b_games[0])
+    team_b_jg_smoothed_wr = smooth_wr(team_b_wr[1], team_b_games[1])
+    team_b_mid_smoothed_wr = smooth_wr(team_b_wr[2], team_b_games[2])
+    team_b_adc_smoothed_wr = smooth_wr(team_b_wr[3], team_b_games[3])
+    team_b_sup_smoothed_wr = smooth_wr(team_b_wr[4], team_b_games[4])
+
+    top_smoothed_wr_diff = team_a_top_smoothed_wr - team_b_top_smoothed_wr
+    jg_smoothed_wr_diff = team_a_jg_smoothed_wr - team_b_jg_smoothed_wr
+    mid_smoothed_wr_diff = team_a_mid_smoothed_wr - team_b_mid_smoothed_wr
+    adc_smoothed_wr_diff = team_a_adc_smoothed_wr - team_b_adc_smoothed_wr
+    sup_smoothed_wr_diff = team_a_sup_smoothed_wr - team_b_sup_smoothed_wr
+
+    team_a_avg_smoothed_wr = (
+        team_a_top_smoothed_wr
+        + team_a_jg_smoothed_wr
+        + team_a_mid_smoothed_wr
+        + team_a_adc_smoothed_wr
+        + team_a_sup_smoothed_wr
+    ) / 5
+
+    team_b_avg_smoothed_wr = (
+        team_b_top_smoothed_wr
+        + team_b_jg_smoothed_wr
+        + team_b_mid_smoothed_wr
+        + team_b_adc_smoothed_wr
+        + team_b_sup_smoothed_wr
+    ) / 5
+
+    avg_smoothed_wr_diff = team_a_avg_smoothed_wr - team_b_avg_smoothed_wr
+
     return {
         "match_id": row["match_id"],
+
         "patch": row["patch"],
 
         "team_a_top": team_a[0],
@@ -180,7 +281,7 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_adc": team_b[3],
         "team_b_sup": team_b[4],
 
-        # raw role WRs
+        # raw WRs
         "team_a_top_wr": team_a_wr[0],
         "team_a_jg_wr": team_a_wr[1],
         "team_a_mid_wr": team_a_wr[2],
@@ -193,7 +294,7 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_adc_wr": team_b_wr[3],
         "team_b_sup_wr": team_b_wr[4],
 
-        # role WR diffs
+        # raw WR diffs
         "top_wr_diff": top_wr_diff,
         "jg_wr_diff": jg_wr_diff,
         "mid_wr_diff": mid_wr_diff,
@@ -217,10 +318,75 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_avg_games": team_b_avg_games,
         "avg_games_diff": avg_games_diff,
 
-        # team WR summaries
+        # new role-wise games features
+        "top_games_diff": top_games_diff,
+        "jg_games_diff": jg_games_diff,
+        "mid_games_diff": mid_games_diff,
+        "adc_games_diff": adc_games_diff,
+        "sup_games_diff": sup_games_diff,
+
+        "top_min_games": top_min_games,
+        "jg_min_games": jg_min_games,
+        "mid_min_games": mid_min_games,
+        "adc_min_games": adc_min_games,
+        "sup_min_games": sup_min_games,
+
+        "top_max_games": top_max_games,
+        "jg_max_games": jg_max_games,
+        "mid_max_games": mid_max_games,
+        "adc_max_games": adc_max_games,
+        "sup_max_games": sup_max_games,
+
+        # low-games flags
+        "team_a_top_low_games": team_a_top_low_games,
+        "team_a_jg_low_games": team_a_jg_low_games,
+        "team_a_mid_low_games": team_a_mid_low_games,
+        "team_a_adc_low_games": team_a_adc_low_games,
+        "team_a_sup_low_games": team_a_sup_low_games,
+
+        "team_b_top_low_games": team_b_top_low_games,
+        "team_b_jg_low_games": team_b_jg_low_games,
+        "team_b_mid_low_games": team_b_mid_low_games,
+        "team_b_adc_low_games": team_b_adc_low_games,
+        "team_b_sup_low_games": team_b_sup_low_games,
+
+        "top_low_games_flag": top_low_games_flag,
+        "jg_low_games_flag": jg_low_games_flag,
+        "mid_low_games_flag": mid_low_games_flag,
+        "adc_low_games_flag": adc_low_games_flag,
+        "sup_low_games_flag": sup_low_games_flag,
+
+        "any_low_games_flag": any_low_games_flag,
+        "low_games_count": low_games_count,
+        "min_games_in_match": min_games_in_match,
+        "max_games_in_match": max_games_in_match,
+
+        # smoothed WRs
+        "team_a_top_smoothed_wr": team_a_top_smoothed_wr,
+        "team_a_jg_smoothed_wr": team_a_jg_smoothed_wr,
+        "team_a_mid_smoothed_wr": team_a_mid_smoothed_wr,
+        "team_a_adc_smoothed_wr": team_a_adc_smoothed_wr,
+        "team_a_sup_smoothed_wr": team_a_sup_smoothed_wr,
+
+        "team_b_top_smoothed_wr": team_b_top_smoothed_wr,
+        "team_b_jg_smoothed_wr": team_b_jg_smoothed_wr,
+        "team_b_mid_smoothed_wr": team_b_mid_smoothed_wr,
+        "team_b_adc_smoothed_wr": team_b_adc_smoothed_wr,
+        "team_b_sup_smoothed_wr": team_b_sup_smoothed_wr,
+
+        "top_smoothed_wr_diff": top_smoothed_wr_diff,
+        "jg_smoothed_wr_diff": jg_smoothed_wr_diff,
+        "mid_smoothed_wr_diff": mid_smoothed_wr_diff,
+        "adc_smoothed_wr_diff": adc_smoothed_wr_diff,
+        "sup_smoothed_wr_diff": sup_smoothed_wr_diff,
+
         "team_a_avg_wr": team_a_avg_wr,
         "team_b_avg_wr": team_b_avg_wr,
         "avg_wr_diff": team_a_avg_wr - team_b_avg_wr,
+
+        "team_a_avg_smoothed_wr": team_a_avg_smoothed_wr,
+        "team_b_avg_smoothed_wr": team_b_avg_smoothed_wr,
+        "avg_smoothed_wr_diff": avg_smoothed_wr_diff,
 
         "team_a_win": int(team_a_win),
     }

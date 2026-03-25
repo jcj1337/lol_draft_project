@@ -1,0 +1,11 @@
+{
+  "n_estimators": 200,
+  "max_depth": 4,
+  "learning_rate": 0.1,
+  "subsample": 0.8,
+  "colsample_bytree": 0.8,
+  "train_loss": 0.6178603416194902,
+  "train_acc": 0.6558831168831168,
+  "val_loss": 0.6451572526443947,
+  "val_acc": 0.6254545454545455
+}

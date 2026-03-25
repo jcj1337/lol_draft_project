@@ -11,14 +11,19 @@ from torch.utils.data import Dataset, DataLoader
 TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
 TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
 NUMERIC_FEATURE_COLS = [
-    "team_a_avg_wr",
-    "team_b_avg_wr",
-    "avg_wr_diff",
     "top_wr_diff",
     "jg_wr_diff",
     "mid_wr_diff",
     "adc_wr_diff",
     "sup_wr_diff",
+    "avg_wr_diff",
+    "top_low_games_flag",
+    "jg_low_games_flag",
+    "mid_low_games_flag",
+    "adc_low_games_flag",
+    "sup_low_games_flag",
+    "any_low_games_flag",
+    "low_games_count",
 ]
 ALL_CHAMP_COLS = TEAM_A_COLS + TEAM_B_COLS
 LABEL_COL = "team_a_win"
