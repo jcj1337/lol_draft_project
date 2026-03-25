@@ -20,14 +20,16 @@ class DraftTransformer(nn.Module):
         self,
         num_champions: int,
         num_numeric_features: int,
-        embed_dim: int = 64,
+        embed_dim: int = 16,
         num_heads: int = 4,
         num_layers: int = 2,
-        ff_dim: int = 128,
+        ff_dim: int = 32,
         dropout: float = 0.1,
-        mlp_hidden_dim: int = 64,
+        mlp_hidden_dim: int = 16,
     ):
         super().__init__()
+
+        self.embed_dim = embed_dim
 
         self.champion_embedding = nn.Embedding(
             num_embeddings=num_champions,
@@ -43,6 +45,9 @@ class DraftTransformer(nn.Module):
             num_embeddings=5,
             embedding_dim=embed_dim,
         )
+
+        # learned CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -79,10 +84,15 @@ class DraftTransformer(nn.Module):
         team_emb = self.team_embedding(team_ids)         # [B, 10, D]
         role_emb = self.role_embedding(role_ids)         # [B, 10, D]
 
-        x = champ_emb + team_emb + role_emb
-        x = self.encoder(x)
+        x = champ_emb + team_emb + role_emb              # [B, 10, D]
 
-        pooled = x.mean(dim=1)  # [B, D]
+        batch_size = x.size(0)
+        cls_tokens = self.cls_token.expand(batch_size, 1, self.embed_dim)  # [B, 1, D]
+        x = torch.cat([cls_tokens, x], dim=1)           # [B, 11, D]
+
+        x = self.encoder(x)                              # [B, 11, D]
+
+        pooled = x[:, 0, :]                              # CLS output, [B, D]
         combined = torch.cat([pooled, numeric_features], dim=1)  # [B, D + F]
         logits = self.head(combined).squeeze(-1)
 
