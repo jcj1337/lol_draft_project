@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from src.embedding_ids import load_cleaned_csv, build_champion_ids, DraftDataset
+from src.embedding_ids import load_cleaned_csv, build_champion_ids, DraftDataset, TEAM_A_COLS, TEAM_B_COLS, LABEL_COL, SCALING_TO_ID, SUBCLASS_TO_ID, TEAM_A_SCALING_COLS, TEAM_A_SUBCLASS_COLS, TEAM_B_SCALING_COLS, TEAM_B_SUBCLASS_COLS, NUMERIC_FEATURE_COLS
 from src.model import DraftTransformer
 
 
@@ -23,38 +23,16 @@ OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # hyperparams
-BATCH_SIZE =16
-EMBED_DIM = 16
+BATCH_SIZE = 256
+EMBED_DIM = 64
 NUM_HEADS = 2
-NUM_LAYERS = 2
-FF_DIM = 32
-DROPOUT = 0.2
-MLP_HIDDEN_DIM = 32
-LEARNING_RATE = 0.001
-EPOCHS = 3
+NUM_LAYERS = 4
+FF_DIM = 128
+DROPOUT = 0.1
+MLP_HIDDEN_DIM = 128
+LEARNING_RATE = 0.0003
+EPOCHS = 10
 SEED = 42
-#test
-#TRAIN_SUBSET_ROWS = 240
-
-# don't change these ever
-NUMERIC_FEATURE_COLS = [
-    "top_wr_diff",
-    "jg_wr_diff",
-    "mid_wr_diff",
-    "adc_wr_diff",
-    "sup_wr_diff",
-    "avg_wr_diff",
-    "top_low_games_flag",
-    "jg_low_games_flag",
-    "mid_low_games_flag",
-    "adc_low_games_flag",
-    "sup_low_games_flag",
-    "any_low_games_flag",
-    "low_games_count",
-]
-TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
-TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
-LABEL_COL = "team_a_win"
 
 # seed
 def set_seed(seed: int) -> None:
@@ -157,11 +135,14 @@ def train_one_epoch(
         champ_ids = batch["champ_ids"].to(device)
         team_ids = batch["team_ids"].to(device)
         role_ids = batch["role_ids"].to(device)
+        subclass_ids = batch["subclass_ids"].to(device)
+        scaling_ids = batch["scaling_ids"].to(device)
         numeric_features = batch["numeric_features"].to(device)
         labels = batch["label"].to(device)
+        
 
         optimizer.zero_grad()
-        logits = model(champ_ids, team_ids, role_ids, numeric_features)
+        logits = model(numeric_features, champ_ids, team_ids, role_ids, subclass_ids, scaling_ids)
         loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
@@ -190,9 +171,11 @@ def evaluate(
         team_ids = batch["team_ids"].to(device)
         role_ids = batch["role_ids"].to(device)
         numeric_features = batch["numeric_features"].to(device)
+        subclass_ids = batch["subclass_ids"].to(device)
+        scaling_ids = batch["scaling_ids"].to(device)
         labels = batch["label"].to(device)
 
-        logits = model(champ_ids, team_ids, role_ids, numeric_features)
+        logits = model(numeric_features, champ_ids, team_ids, role_ids, subclass_ids, scaling_ids)
         loss = criterion(logits, labels)
 
         probs = torch.sigmoid(logits)
@@ -209,24 +192,54 @@ def evaluate(
 
 
 @torch.no_grad()
+@torch.no_grad()
 def print_example_predictions(
     model: nn.Module,
-    test_df: pd.DataFrame,
+    df: pd.DataFrame,
     champ_to_id: dict[str, int],
     device: torch.device,
     num_examples: int = 5,
 ) -> None:
-    model.eval()
-
     print("\nExample predictions:")
-    num_examples = min(num_examples, len(test_df))
 
-    for i in range(num_examples):
-        row = test_df.iloc[i]
+    for i in range(min(num_examples, len(df))):
+        row = df.iloc[i]
 
         team_a = [str(row[col]).strip() for col in TEAM_A_COLS]
         team_b = [str(row[col]).strip() for col in TEAM_B_COLS]
-        label = int(row[LABEL_COL])
+
+        champ_ids = torch.tensor(
+            [[champ_to_id[c] for c in team_a + team_b]],
+            dtype=torch.long,
+            device=device,
+        )
+
+        team_ids = torch.tensor(
+            [[0, 0, 0, 0, 0, 1, 1, 1, 1, 1]],
+            dtype=torch.long,
+            device=device,
+        )
+
+        role_ids = torch.tensor(
+            [[0, 1, 2, 3, 4, 0, 1, 2, 3, 4]],
+            dtype=torch.long,
+            device=device,
+        )
+
+        subclass_cols = TEAM_A_SUBCLASS_COLS + TEAM_B_SUBCLASS_COLS
+        scaling_cols = TEAM_A_SCALING_COLS + TEAM_B_SCALING_COLS
+
+        subclass_ids = torch.tensor(
+            [[SUBCLASS_TO_ID[str(row[col]).strip()] for col in subclass_cols]],
+            dtype=torch.long,
+            device=device,
+        )
+
+        scaling_ids = torch.tensor(
+            [[SCALING_TO_ID[str(row[col]).strip()] for col in scaling_cols]],
+            dtype=torch.long,
+            device=device,
+        )
 
         numeric_features = torch.tensor(
             [[float(row[col]) for col in NUMERIC_FEATURE_COLS]],
@@ -234,33 +247,25 @@ def print_example_predictions(
             device=device,
         )
 
-        champ_ids = torch.tensor(
-    [[champ_to_id[c] for c in team_a + team_b]],
-    dtype=torch.long,
-    device=device,
-)
-        team_ids = torch.tensor(
-            [[0] * 5 + [1] * 5],
-            dtype=torch.long,
-            device=device,
-        )
-        role_ids = torch.tensor(
-            [[0, 1, 2, 3, 4, 0, 1, 2, 3, 4]],
-            dtype=torch.long,
-            device=device,
+        logit = model(
+            numeric_features,
+            champ_ids,
+            team_ids,
+            role_ids,
+            subclass_ids,
+            scaling_ids,
         )
 
-        logit = model(champ_ids, team_ids, role_ids, numeric_features)
         prob = torch.sigmoid(logit).item()
         pred = int(prob >= 0.5)
+        actual = int(row[LABEL_COL])
 
-        print(f"\nExample {i + 1}")
-        print(f"Team A: {team_a}")
-        print(f"Team B: {team_b}")
-        print(f"Actual team_a_win: {label}")
-        print(f"Predicted prob(team_a_win=1): {prob:.4f}")
-        print(f"Predicted class: {pred}")
-
+        print(f"Row {i:02d}")
+        print(f"  Team A: {team_a}")
+        print(f"  Team B: {team_b}")
+        print(f"  Actual team_a_win: {actual}")
+        print(f"  Predicted prob(team_a_win=1): {prob:.4f}")
+        print(f"  Predicted class: {pred}")
 
 def plot_losses(train_losses: list[float], val_losses: list[float], out_path: Path) -> None:
     epochs = list(range(1, len(train_losses) + 1))
@@ -292,10 +297,12 @@ def collect_probs_and_labels(
             champ_ids = batch["champ_ids"].to(device)
             team_ids = batch["team_ids"].to(device)
             role_ids = batch["role_ids"].to(device)
+            subclass_ids = batch["subclass_ids"].to(device)
+            scaling_ids = batch["scaling_ids"].to(device)
             numeric_features = batch["numeric_features"].to(device)
             labels = batch["label"].float().to(device)
 
-            logits = model(champ_ids, team_ids, role_ids, numeric_features)
+            logits = model(numeric_features, champ_ids, team_ids, role_ids, subclass_ids, scaling_ids)
             probs = torch.sigmoid(logits)
 
             all_probs.append(probs.cpu().numpy())

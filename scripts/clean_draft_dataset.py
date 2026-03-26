@@ -1,4 +1,14 @@
 from pathlib import Path
+from src.champion_labels import (
+    CHAMPION_PROFILE,
+    normalize_champion_name,
+    get_champion_profile,
+    get_champion_subclass,
+    get_champion_damage_type,
+    get_champion_range_type,
+    get_champion_scaling_type,
+)
+import re
 import pandas as pd
 
 INTERIM_DIR = Path("data/processed")
@@ -39,6 +49,38 @@ NUMERIC_COLS = [
     *RED_GAMES_COLS,
 ]
 
+# champion labels features
+SUBCLASS_ORDER = [
+    "tank",
+    "bruiser",
+    "battlemage",
+    "mage",
+    "marksman",
+    "assassin",
+    "enchanter",
+    "engage",
+]
+
+DAMAGE_TYPE_ORDER = ["ad", "ap", "mixed"]
+RANGE_TYPE_ORDER = ["melee", "ranged", "mixed"]
+SCALING_TYPE_ORDER = ["early", "mid", "late"]
+FRONTLINE_SUBCLASSES = {"tank", "bruiser", "engage"}
+
+def count_profile_values(team: tuple[str, ...], field: str, allowed_values: list[str]) -> dict[str, int]:
+    counts = {value: 0 for value in allowed_values}
+    for champ in team:
+        value = get_champion_profile(champ)[field]
+        counts[value] += 1
+    return counts
+
+
+def count_subclasses(team: tuple[str, ...]) -> dict[str, int]:
+    counts = {subclass: 0 for subclass in SUBCLASS_ORDER}
+    for champ in team:
+        subclass = get_champion_subclass(champ)
+        counts[subclass] += 1
+    return counts
+
 
 def find_latest_input_csv(data_dir: Path) -> Path:
     candidates = list(data_dir.glob("draft_dataset*.csv"))
@@ -54,19 +96,16 @@ def make_output_path(input_csv: Path) -> Path:
 
 def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ensure correct data types 
+    Ensure correct data types.
     """
     df = df.copy()
 
-    # strip champ strings
     for col in BLUE_CHAMP_COLS + RED_CHAMP_COLS + ["match_id", "patch"]:
         df[col] = df[col].astype(str).str.strip()
 
-    # numeric coercion
     for col in NUMERIC_COLS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # games should be ints
     for col in BLUE_GAMES_COLS + RED_GAMES_COLS:
         df[col] = df[col].astype("Int64")
 
@@ -75,7 +114,7 @@ def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
 
 def validate_input(df: pd.DataFrame) -> None:
     """
-    Validation function probably useless i cant lie
+    Basic validation.
     """
     missing = [col for col in REQUIRED_COLS if col not in df.columns]
     if missing:
@@ -97,7 +136,6 @@ def validate_input(df: pd.DataFrame) -> None:
         if (df[cols] == "").any().any():
             raise ValueError(f"Found blank champion names on {side} side.")
 
-    # reasonable bounds
     wr_cols = BLUE_WR_COLS + RED_WR_COLS + ["blue_avg_wr", "red_avg_wr"]
     for col in wr_cols:
         if ((df[col] < 0) | (df[col] > 1)).any():
@@ -107,6 +145,25 @@ def validate_input(df: pd.DataFrame) -> None:
     for col in games_cols:
         if (df[col] < 0).any():
             raise ValueError(f"Games-played column has negative values: {col}")
+
+
+def validate_profile_mapping(df: pd.DataFrame) -> None:
+    all_champs = set()
+    for col in BLUE_CHAMP_COLS + RED_CHAMP_COLS:
+        all_champs.update(df[col].dropna().astype(str).str.strip().tolist())
+
+    missing = []
+    for champ in sorted(all_champs):
+        key = normalize_champion_name(champ)
+        if key not in CHAMPION_PROFILE:
+            missing.append((champ, key))
+
+    if missing:
+        formatted = ", ".join([f"{orig} -> {norm}" for orig, norm in missing[:25]])
+        raise KeyError(
+            "Some champions are missing from CHAMPION_PROFILE. "
+            f"First few: {formatted}"
+        )
 
 
 def canonicalize_row(row: pd.Series) -> dict:
@@ -151,7 +208,7 @@ def canonicalize_row(row: pd.Series) -> dict:
         team_b_avg_wr = blue_avg_wr
         team_a_win = 1 - blue_win
 
-    # existing raw WR diffs
+    # raw WR diffs
     top_wr_diff = team_a_wr[0] - team_b_wr[0]
     jg_wr_diff = team_a_wr[1] - team_b_wr[1]
     mid_wr_diff = team_a_wr[2] - team_b_wr[2]
@@ -220,53 +277,49 @@ def canonicalize_row(row: pd.Series) -> dict:
     min_games_in_match = min(*team_a_games, *team_b_games)
     max_games_in_match = max(*team_a_games, *team_b_games)
 
-    # smoothed WRs
-    # shrink low-sample WRs toward 0.5
-    SMOOTHING_ALPHA = 20.0
+    # subclass labels by role
+    team_a_top_subclass = get_champion_subclass(team_a[0])
+    team_a_jg_subclass = get_champion_subclass(team_a[1])
+    team_a_mid_subclass = get_champion_subclass(team_a[2])
+    team_a_adc_subclass = get_champion_subclass(team_a[3])
+    team_a_sup_subclass = get_champion_subclass(team_a[4])
 
-    def smooth_wr(wr: float, games: int, alpha: float = SMOOTHING_ALPHA) -> float:
-        approx_wins = wr * games
-        return (approx_wins + alpha * 0.5) / (games + alpha)
+    team_b_top_subclass = get_champion_subclass(team_b[0])
+    team_b_jg_subclass = get_champion_subclass(team_b[1])
+    team_b_mid_subclass = get_champion_subclass(team_b[2])
+    team_b_adc_subclass = get_champion_subclass(team_b[3])
+    team_b_sup_subclass = get_champion_subclass(team_b[4])
 
-    team_a_top_smoothed_wr = smooth_wr(team_a_wr[0], team_a_games[0])
-    team_a_jg_smoothed_wr = smooth_wr(team_a_wr[1], team_a_games[1])
-    team_a_mid_smoothed_wr = smooth_wr(team_a_wr[2], team_a_games[2])
-    team_a_adc_smoothed_wr = smooth_wr(team_a_wr[3], team_a_games[3])
-    team_a_sup_smoothed_wr = smooth_wr(team_a_wr[4], team_a_games[4])
+    team_a_counts = count_subclasses(team_a)
+    team_b_counts = count_subclasses(team_b)
 
-    team_b_top_smoothed_wr = smooth_wr(team_b_wr[0], team_b_games[0])
-    team_b_jg_smoothed_wr = smooth_wr(team_b_wr[1], team_b_games[1])
-    team_b_mid_smoothed_wr = smooth_wr(team_b_wr[2], team_b_games[2])
-    team_b_adc_smoothed_wr = smooth_wr(team_b_wr[3], team_b_games[3])
-    team_b_sup_smoothed_wr = smooth_wr(team_b_wr[4], team_b_games[4])
+    team_a_frontline_count = sum(team_a_counts[sub] for sub in FRONTLINE_SUBCLASSES)
+    team_b_frontline_count = sum(team_b_counts[sub] for sub in FRONTLINE_SUBCLASSES)
 
-    top_smoothed_wr_diff = team_a_top_smoothed_wr - team_b_top_smoothed_wr
-    jg_smoothed_wr_diff = team_a_jg_smoothed_wr - team_b_jg_smoothed_wr
-    mid_smoothed_wr_diff = team_a_mid_smoothed_wr - team_b_mid_smoothed_wr
-    adc_smoothed_wr_diff = team_a_adc_smoothed_wr - team_b_adc_smoothed_wr
-    sup_smoothed_wr_diff = team_a_sup_smoothed_wr - team_b_sup_smoothed_wr
+    # outlier flags
+    team_a_top_is_enchanter = int(team_a_top_subclass == "enchanter")
+    team_b_top_is_enchanter = int(team_b_top_subclass == "enchanter")
 
-    team_a_avg_smoothed_wr = (
-        team_a_top_smoothed_wr
-        + team_a_jg_smoothed_wr
-        + team_a_mid_smoothed_wr
-        + team_a_adc_smoothed_wr
-        + team_a_sup_smoothed_wr
-    ) / 5
+    team_a_jg_is_enchanter = int(team_a_jg_subclass == "enchanter")
+    team_b_jg_is_enchanter = int(team_b_jg_subclass == "enchanter")
 
-    team_b_avg_smoothed_wr = (
-        team_b_top_smoothed_wr
-        + team_b_jg_smoothed_wr
-        + team_b_mid_smoothed_wr
-        + team_b_adc_smoothed_wr
-        + team_b_sup_smoothed_wr
-    ) / 5
+    # scaling type
+    team_a_top_scaling_type = get_champion_scaling_type(team_a[0])
+    team_a_jg_scaling_type = get_champion_scaling_type(team_a[1])
+    team_a_mid_scaling_type = get_champion_scaling_type(team_a[2])
+    team_a_adc_scaling_type = get_champion_scaling_type(team_a[3])
+    team_a_sup_scaling_type = get_champion_scaling_type(team_a[4])
 
-    avg_smoothed_wr_diff = team_a_avg_smoothed_wr - team_b_avg_smoothed_wr
+    team_b_top_scaling_type = get_champion_scaling_type(team_b[0])
+    team_b_jg_scaling_type = get_champion_scaling_type(team_b[1])
+    team_b_mid_scaling_type = get_champion_scaling_type(team_b[2])
+    team_b_adc_scaling_type = get_champion_scaling_type(team_b[3])
+    team_b_sup_scaling_type = get_champion_scaling_type(team_b[4])
 
+    team_a_scaling_counts = count_profile_values(team_a, "scaling_type", SCALING_TYPE_ORDER)
+    team_b_scaling_counts = count_profile_values(team_b, "scaling_type", SCALING_TYPE_ORDER)
     return {
         "match_id": row["match_id"],
-
         "patch": row["patch"],
 
         "team_a_top": team_a[0],
@@ -280,6 +333,49 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_mid": team_b[2],
         "team_b_adc": team_b[3],
         "team_b_sup": team_b[4],
+
+        # subclass labels by role
+        "team_a_top_subclass": team_a_top_subclass,
+        "team_a_jg_subclass": team_a_jg_subclass,
+        "team_a_mid_subclass": team_a_mid_subclass,
+        "team_a_adc_subclass": team_a_adc_subclass,
+        "team_a_sup_subclass": team_a_sup_subclass,
+
+        "team_b_top_subclass": team_b_top_subclass,
+        "team_b_jg_subclass": team_b_jg_subclass,
+        "team_b_mid_subclass": team_b_mid_subclass,
+        "team_b_adc_subclass": team_b_adc_subclass,
+        "team_b_sup_subclass": team_b_sup_subclass,
+
+        # team subclass counts
+        "team_a_num_tanks": team_a_counts["tank"],
+        "team_a_num_battlemages": team_a_counts["battlemage"],
+        "team_a_num_bruisers": team_a_counts["bruiser"],
+        "team_a_num_mages": team_a_counts["mage"],
+        "team_a_num_marksmen": team_a_counts["marksman"],
+        "team_a_num_assassins": team_a_counts["assassin"],
+        "team_a_num_enchanters": team_a_counts["enchanter"],
+        "team_a_num_engages": team_a_counts["engage"],
+
+
+        "team_b_num_tanks": team_b_counts["tank"],
+        "team_b_num_battlemages": team_b_counts["battlemage"],
+        "team_b_num_bruisers": team_b_counts["bruiser"],
+        "team_b_num_mages": team_b_counts["mage"],
+        "team_b_num_marksmen": team_b_counts["marksman"],
+        "team_b_num_assassins": team_b_counts["assassin"],
+        "team_b_num_enchanters": team_b_counts["enchanter"],
+        "team_b_num_engages": team_b_counts["engage"],
+
+        # frontline summaries
+        "team_a_frontline_count": team_a_frontline_count,
+        "team_b_frontline_count": team_b_frontline_count,
+
+        # simple mismatch flags
+        "team_a_top_is_enchanter": team_a_top_is_enchanter,
+        "team_b_top_is_enchanter": team_b_top_is_enchanter,
+        "team_a_jg_is_enchanter": team_a_jg_is_enchanter,
+        "team_b_jg_is_enchanter": team_b_jg_is_enchanter,
 
         # raw WRs
         "team_a_top_wr": team_a_wr[0],
@@ -318,7 +414,6 @@ def canonicalize_row(row: pd.Series) -> dict:
         "team_b_avg_games": team_b_avg_games,
         "avg_games_diff": avg_games_diff,
 
-        # new role-wise games features
         "top_games_diff": top_games_diff,
         "jg_games_diff": jg_games_diff,
         "mid_games_diff": mid_games_diff,
@@ -361,32 +456,18 @@ def canonicalize_row(row: pd.Series) -> dict:
         "min_games_in_match": min_games_in_match,
         "max_games_in_match": max_games_in_match,
 
-        # smoothed WRs
-        "team_a_top_smoothed_wr": team_a_top_smoothed_wr,
-        "team_a_jg_smoothed_wr": team_a_jg_smoothed_wr,
-        "team_a_mid_smoothed_wr": team_a_mid_smoothed_wr,
-        "team_a_adc_smoothed_wr": team_a_adc_smoothed_wr,
-        "team_a_sup_smoothed_wr": team_a_sup_smoothed_wr,
+        # scaling types
+        "team_a_top_scaling_type": team_a_top_scaling_type,
+        "team_a_jg_scaling_type": team_a_jg_scaling_type,
+        "team_a_mid_scaling_type": team_a_mid_scaling_type,
+        "team_a_adc_scaling_type": team_a_adc_scaling_type,
+        "team_a_sup_scaling_type": team_a_sup_scaling_type,
 
-        "team_b_top_smoothed_wr": team_b_top_smoothed_wr,
-        "team_b_jg_smoothed_wr": team_b_jg_smoothed_wr,
-        "team_b_mid_smoothed_wr": team_b_mid_smoothed_wr,
-        "team_b_adc_smoothed_wr": team_b_adc_smoothed_wr,
-        "team_b_sup_smoothed_wr": team_b_sup_smoothed_wr,
-
-        "top_smoothed_wr_diff": top_smoothed_wr_diff,
-        "jg_smoothed_wr_diff": jg_smoothed_wr_diff,
-        "mid_smoothed_wr_diff": mid_smoothed_wr_diff,
-        "adc_smoothed_wr_diff": adc_smoothed_wr_diff,
-        "sup_smoothed_wr_diff": sup_smoothed_wr_diff,
-
-        "team_a_avg_wr": team_a_avg_wr,
-        "team_b_avg_wr": team_b_avg_wr,
-        "avg_wr_diff": team_a_avg_wr - team_b_avg_wr,
-
-        "team_a_avg_smoothed_wr": team_a_avg_smoothed_wr,
-        "team_b_avg_smoothed_wr": team_b_avg_smoothed_wr,
-        "avg_smoothed_wr_diff": avg_smoothed_wr_diff,
+        "team_b_top_scaling_type": team_b_top_scaling_type,
+        "team_b_jg_scaling_type": team_b_jg_scaling_type,
+        "team_b_mid_scaling_type": team_b_mid_scaling_type,
+        "team_b_adc_scaling_type": team_b_adc_scaling_type,
+        "team_b_sup_scaling_type": team_b_sup_scaling_type,
 
         "team_a_win": int(team_a_win),
     }
@@ -400,6 +481,7 @@ def main() -> None:
     validate_input(df)
     df = coerce_types(df)
     validate_input(df)
+    validate_profile_mapping(df)
 
     df = df.drop_duplicates(subset=["match_id"]).reset_index(drop=True)
 
@@ -410,7 +492,7 @@ def main() -> None:
 
     print(f"Input file:  {input_csv.resolve()}")
     print(f"Output file: {output_csv.resolve()}")
-    print(f"Saved {len(out_df)} cleaned rows")
+    print(f"Saved {len(out_df)} cleaned / feature-engineered rows")
     print(out_df.head())
 
 

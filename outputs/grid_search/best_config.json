@@ -1,0 +1,12 @@
+{
+  "batch_size": 256,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "embed_dim": 64,
+  "num_layers": 3,
+  "dropout": 0.1,
+  "ff_dim": 64,
+  "mlp_hidden_dim": 64,
+  "best_val_loss": 0.6424221870248968,
+  "best_val_acc": 0.6314545454545455
+}

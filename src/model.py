@@ -46,6 +46,9 @@ class DraftTransformer(nn.Module):
             embedding_dim=embed_dim,
         )
 
+        self.subclass_embedding = nn.Embedding(num_embeddings=8, embedding_dim=embed_dim)
+        self.scaling_embedding = nn.Embedding(num_embeddings=3, embedding_dim=embed_dim)
+
         # learned CLS token
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
@@ -75,25 +78,29 @@ class DraftTransformer(nn.Module):
 
     def forward(
         self,
+        numeric_features: torch.Tensor,
         champ_ids: torch.Tensor,
         team_ids: torch.Tensor,
         role_ids: torch.Tensor,
-        numeric_features: torch.Tensor,
+        subclass_ids: torch.Tensor,
+        scaling_ids: torch.Tensor,
     ) -> torch.Tensor:
-        champ_emb = self.champion_embedding(champ_ids)   # [B, 10, D]
-        team_emb = self.team_embedding(team_ids)         # [B, 10, D]
-        role_emb = self.role_embedding(role_ids)         # [B, 10, D]
+        champ_emb = self.champion_embedding(champ_ids)
+        team_emb = self.team_embedding(team_ids)
+        role_emb = self.role_embedding(role_ids)
+        subclass_emb = self.subclass_embedding(subclass_ids)
+        scaling_emb = self.scaling_embedding(scaling_ids)
 
-        x = champ_emb + team_emb + role_emb              # [B, 10, D]
+        x = champ_emb + team_emb + role_emb + subclass_emb + scaling_emb
 
         batch_size = x.size(0)
-        cls_tokens = self.cls_token.expand(batch_size, 1, self.embed_dim)  # [B, 1, D]
-        x = torch.cat([cls_tokens, x], dim=1)           # [B, 11, D]
+        cls_tokens = self.cls_token.expand(batch_size, 1, self.embed_dim)
+        x = torch.cat([cls_tokens, x], dim=1)
 
-        x = self.encoder(x)                              # [B, 11, D]
+        x = self.encoder(x)
 
-        pooled = x[:, 0, :]                              # CLS output, [B, D]
-        combined = torch.cat([pooled, numeric_features], dim=1)  # [B, D + F]
+        pooled = x[:, 0, :]
+        combined = torch.cat([pooled, numeric_features], dim=1)
         logits = self.head(combined).squeeze(-1)
 
         return logits

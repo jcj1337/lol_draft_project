@@ -42,29 +42,52 @@ CATEGORICAL_FEATURE_COLS = [
 ]
 
 NUMERIC_FEATURE_COLS = [
+    # player-strength features
     "top_wr_diff",
     "jg_wr_diff",
     "mid_wr_diff",
     "adc_wr_diff",
     "sup_wr_diff",
-    "avg_wr_diff",
+
+    # confidence features
     "top_low_games_flag",
     "jg_low_games_flag",
     "mid_low_games_flag",
     "adc_low_games_flag",
     "sup_low_games_flag",
-    "any_low_games_flag",
     "low_games_count",
-]
+    "avg_games_diff",
+    
+    # subclass counts
+    "team_a_num_tanks",
+    "team_a_num_bruisers",
+    "team_a_num_mages",
+    "team_a_num_marksmen",
+    "team_a_num_assassins",
+    "team_a_num_enchanters",
+    "team_a_num_engages",
 
+    "team_b_num_tanks",
+    "team_b_num_bruisers",
+    "team_b_num_mages",
+    "team_b_num_marksmen",
+    "team_b_num_assassins",
+    "team_b_num_enchanters",
+    "team_b_num_engages",
+
+    # frontline / weird-role flags
+    "team_a_frontline_count",
+    "team_b_frontline_count",
+    "team_a_top_is_enchanter",
+    "team_b_top_is_enchanter",
+    "team_a_jg_is_enchanter",
+    "team_b_jg_is_enchanter",
+]
 # fixed model config
 LOGREG_C = 1.0
 LOGREG_PENALTY = "l2"
 
 
-# -----------------------------
-# Utils
-# -----------------------------
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)

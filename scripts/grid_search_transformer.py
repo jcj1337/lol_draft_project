@@ -4,56 +4,49 @@ from itertools import product
 from pathlib import Path
 import json
 import random
-
+import time
+from datetime import timedelta
 import numpy as np
 import pandas as pd
 import torch
 from torch import nn
 
-from src.embedding_ids import load_cleaned_csv, build_champion_ids, DraftDataset
+from src.embedding_ids import (
+    load_cleaned_csv,
+    build_champion_ids,
+    DraftDataset,
+    NUMERIC_FEATURE_COLS,
+)
 from src.model import DraftTransformer
 
 
-# -----------------------------
-# Config
-# -----------------------------
 DATA_DIR = Path("data/cleaned")
 OUTPUT_DIR = Path("outputs/grid_search")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED = 42
-BATCH_SIZE = 256
-EPOCHS = 6
+EPOCHS = 10
+DROPOUT = 0.1
 
-LABEL_COL = "team_a_win"
+# fixed hyperparameters (pointless to change)
+TRAIN_SUBSET_ROWS = None
+NUM_LAYERS = 2
+FF_DIM = 64
+MLP_HIDDEN_DIM = 64
+DROPOUT = 0.1
+NUM_HEADS = 2
+EPOCHS = 10
 
-NUMERIC_FEATURE_COLS = [
-    "team_a_avg_wr",
-    "team_b_avg_wr",
-    "avg_wr_diff",
-    "top_wr_diff",
-    "jg_wr_diff",
-    "mid_wr_diff",
-    "adc_wr_diff",
-    "sup_wr_diff",
-]
-
-# small search first
+# focused search
 SEARCH_SPACE = {
+    "batch_size": [128, 256],
     "learning_rate": [3e-4, 1e-3],
-    "dropout": [0.0, 0.1],
     "weight_decay": [0.0, 1e-4],
-    "embed_dim": [64, 128],
+    "embed_dim": [32, 64],
     "num_layers": [2, 3],
 }
 
-# set to None for full train split
-TRAIN_SUBSET_ROWS = None
 
-
-# -----------------------------
-# Utils
-# -----------------------------
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -156,18 +149,27 @@ def train_one_epoch(
         champ_ids = batch["champ_ids"].to(device)
         team_ids = batch["team_ids"].to(device)
         role_ids = batch["role_ids"].to(device)
+        subclass_ids = batch["subclass_ids"].to(device)
+        scaling_ids = batch["scaling_ids"].to(device)
         numeric_features = batch["numeric_features"].to(device)
         labels = batch["label"].float().to(device)
 
         optimizer.zero_grad()
-        logits = model(champ_ids, team_ids, role_ids, numeric_features)
+        logits = model(
+            numeric_features,
+            champ_ids,
+            team_ids,
+            role_ids,
+            subclass_ids,
+            scaling_ids,
+        )
         loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
 
-        batch_size = labels.size(0)
-        total_loss += loss.item() * batch_size
-        total_examples += batch_size
+        bs = labels.size(0)
+        total_loss += loss.item() * bs
+        total_examples += bs
 
     return total_loss / total_examples
 
@@ -188,19 +190,28 @@ def evaluate(
         champ_ids = batch["champ_ids"].to(device)
         team_ids = batch["team_ids"].to(device)
         role_ids = batch["role_ids"].to(device)
+        subclass_ids = batch["subclass_ids"].to(device)
+        scaling_ids = batch["scaling_ids"].to(device)
         numeric_features = batch["numeric_features"].to(device)
         labels = batch["label"].float().to(device)
 
-        logits = model(champ_ids, team_ids, role_ids, numeric_features)
+        logits = model(
+            numeric_features,
+            champ_ids,
+            team_ids,
+            role_ids,
+            subclass_ids,
+            scaling_ids,
+        )
         loss = criterion(logits, labels)
 
         probs = torch.sigmoid(logits)
         preds = (probs >= 0.5).float()
 
-        batch_size = labels.size(0)
-        total_loss += loss.item() * batch_size
+        bs = labels.size(0)
+        total_loss += loss.item() * bs
         total_correct += (preds == labels).sum().item()
-        total_examples += batch_size
+        total_examples += bs
 
     avg_loss = total_loss / total_examples
     avg_acc = total_correct / total_examples
@@ -211,17 +222,16 @@ def build_model(
     champ_to_id: dict[str, int],
     embed_dim: int,
     num_layers: int,
-    dropout: float,
 ) -> DraftTransformer:
     return DraftTransformer(
         num_champions=len(champ_to_id),
         num_numeric_features=len(NUMERIC_FEATURE_COLS),
         embed_dim=embed_dim,
-        num_heads=4,
+        num_heads=NUM_HEADS,
         num_layers=num_layers,
-        ff_dim=128,
-        dropout=dropout,
-        mlp_hidden_dim=64,
+        ff_dim=FF_DIM,
+        dropout=DROPOUT,
+        mlp_hidden_dim=MLP_HIDDEN_DIM,
     )
 
 
@@ -232,14 +242,13 @@ def run_one_config(
     champ_to_id: dict[str, int],
     device: torch.device,
 ) -> dict:
-    train_loader = make_loader(train_df, champ_to_id, BATCH_SIZE, shuffle=True)
-    val_loader = make_loader(val_df, champ_to_id, BATCH_SIZE, shuffle=False)
+    train_loader = make_loader(train_df, champ_to_id, config["batch_size"], shuffle=True)
+    val_loader = make_loader(val_df, champ_to_id, config["batch_size"], shuffle=False)
 
     model = build_model(
         champ_to_id=champ_to_id,
         embed_dim=config["embed_dim"],
         num_layers=config["num_layers"],
-        dropout=config["dropout"],
     ).to(device)
 
     criterion = nn.BCEWithLogitsLoss()
@@ -270,6 +279,9 @@ def run_one_config(
 
     return {
         **config,
+        "dropout": DROPOUT,
+        "ff_dim": FF_DIM,
+        "mlp_hidden_dim": MLP_HIDDEN_DIM,
         "best_val_loss": best_val_loss,
         "best_val_acc": best_val_acc,
     }
@@ -277,7 +289,6 @@ def run_one_config(
 
 def main() -> None:
     set_seed(SEED)
-
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -294,7 +305,7 @@ def main() -> None:
     champ_to_id = build_champion_ids(df)
 
     train_df, val_df, test_df = split_dataframe(df, 0.70, 0.15, 0.15, seed=SEED)
-    train_df, val_df, test_df, numeric_mean, numeric_std = standardize_numeric_features(
+    train_df, val_df, test_df, _, _ = standardize_numeric_features(
         train_df, val_df, test_df, NUMERIC_FEATURE_COLS
     )
 
@@ -307,6 +318,7 @@ def main() -> None:
     print(f"Test rows:  {len(test_df)}")
     print(f"Unique champions: {len(champ_to_id)}")
 
+    
     param_names = list(SEARCH_SPACE.keys())
     param_values = [SEARCH_SPACE[name] for name in param_names]
     configs = [dict(zip(param_names, vals)) for vals in product(*param_values)]
@@ -315,8 +327,11 @@ def main() -> None:
 
     results = []
     best_result = None
-
+    search_start_time = time.time()
     for i, config in enumerate(configs, start=1):
+        
+        config_start_time = time.time()
+
         print(f"\n=== Config {i}/{len(configs)} ===")
         result = run_one_config(
             config=config,
@@ -325,22 +340,37 @@ def main() -> None:
             champ_to_id=champ_to_id,
             device=device,
         )
-        results.append(result)
 
-        if best_result is None or result["best_val_loss"] < best_result["best_val_loss"]:
-            best_result = result
+        config_elapsed = time.time() - config_start_time
+        total_elapsed = time.time() - search_start_time
+        avg_time_per_config = total_elapsed / i
+        remaining_configs = len(configs) - i
+        est_remaining = avg_time_per_config * remaining_configs
+        est_total = avg_time_per_config * len(configs)
 
-        results_df = pd.DataFrame(results).sort_values(
-            by=["best_val_loss", "best_val_acc"],
-            ascending=[True, False],
+        print(
+            f"Config time: {timedelta(seconds=int(config_elapsed))} | "
+            f"Elapsed: {timedelta(seconds=int(total_elapsed))} | "
+            f"Est. remaining: {timedelta(seconds=int(est_remaining))} | "
+            f"Est. total: {timedelta(seconds=int(est_total))}"
         )
-        results_df.to_csv(OUTPUT_DIR / "grid_search_results.csv", index=False)
+
+    results.append(result)
+
+    if best_result is None or result["best_val_loss"] < best_result["best_val_loss"]:
+        best_result = result
+
+    pd.DataFrame(results).sort_values(
+        by=["best_val_loss", "best_val_acc"],
+        ascending=[True, False],
+    ).to_csv(OUTPUT_DIR / "grid_search_results.csv", index=False)
 
     assert best_result is not None
 
     with open(OUTPUT_DIR / "best_config.json", "w", encoding="utf-8") as f:
         json.dump(best_result, f, indent=2)
-
+    total_search_time = time.time() - search_start_time
+    print(f"\nTotal grid search time: {timedelta(seconds=int(total_search_time))}")
     print("\n=== Best Result ===")
     print(json.dumps(best_result, indent=2))
     print(f"\nSaved results to: {(OUTPUT_DIR / 'grid_search_results.csv').resolve()}")
