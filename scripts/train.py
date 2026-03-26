@@ -26,10 +26,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 BATCH_SIZE = 256
 EMBED_DIM = 64
 NUM_HEADS = 2
-NUM_LAYERS = 4
-FF_DIM = 128
+NUM_LAYERS = 3
+FF_DIM = 64
 DROPOUT = 0.1
-MLP_HIDDEN_DIM = 128
+MLP_HIDDEN_DIM = 64
 LEARNING_RATE = 0.0003
 EPOCHS = 10
 SEED = 42
@@ -490,7 +490,7 @@ def main() -> None:
 
     # load best checkpoint before testing
     model.load_state_dict(torch.load(best_model_path, map_location=device))
-
+    print(f"\nLoaded best model from: {best_model_path.resolve()} with val loss: {best_val_loss:.4f}")
     test_loss, test_acc = evaluate(model, test_loader, criterion, device)
     print(f"\nFinal Test Loss: {test_loss:.4f}")
     print(f"Final Test Accuracy: {test_acc:.4f}")
