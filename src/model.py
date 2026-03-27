@@ -46,8 +46,18 @@ class DraftTransformer(nn.Module):
             embedding_dim=embed_dim,
         )
 
-        self.subclass_embedding = nn.Embedding(num_embeddings=8, embedding_dim=embed_dim)
-        self.scaling_embedding = nn.Embedding(num_embeddings=3, embedding_dim=embed_dim)
+        self.subclass_embedding = nn.Embedding(
+            num_embeddings=8,
+            embedding_dim=embed_dim,
+        )
+
+        self.scaling_embedding = nn.Embedding(
+            num_embeddings=3,
+            embedding_dim=embed_dim,
+        )
+
+        # project full numeric feature vector into one token
+        self.numeric_token_proj = nn.Linear(num_numeric_features, embed_dim)
 
         # learned CLS token
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
@@ -66,11 +76,10 @@ class DraftTransformer(nn.Module):
             num_layers=num_layers,
         )
 
-        combined_dim = embed_dim + num_numeric_features
-
+        # no numeric concat anymore; head only sees CLS output
         self.head = nn.Sequential(
-            nn.LayerNorm(combined_dim),
-            nn.Linear(combined_dim, mlp_hidden_dim),
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, mlp_hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(mlp_hidden_dim, 1),
@@ -85,22 +94,30 @@ class DraftTransformer(nn.Module):
         subclass_ids: torch.Tensor,
         scaling_ids: torch.Tensor,
     ) -> torch.Tensor:
-        champ_emb = self.champion_embedding(champ_ids)
-        team_emb = self.team_embedding(team_ids)
-        role_emb = self.role_embedding(role_ids)
-        subclass_emb = self.subclass_embedding(subclass_ids)
-        scaling_emb = self.scaling_embedding(scaling_ids)
+        champ_emb = self.champion_embedding(champ_ids)       # [B, 10, D]
+        team_emb = self.team_embedding(team_ids)             # [B, 10, D]
+        role_emb = self.role_embedding(role_ids)             # [B, 10, D]
+        subclass_emb = self.subclass_embedding(subclass_ids) # [B, 10, D]
+        scaling_emb = self.scaling_embedding(scaling_ids)    # [B, 10, D]
 
-        x = champ_emb + team_emb + role_emb + subclass_emb + scaling_emb
+        # 10 draft tokens
+        x = champ_emb + team_emb + role_emb + subclass_emb + scaling_emb  # [B, 10, D]
 
         batch_size = x.size(0)
-        cls_tokens = self.cls_token.expand(batch_size, 1, self.embed_dim)
-        x = torch.cat([cls_tokens, x], dim=1)
+
+        # 1 CLS token
+        cls_tokens = self.cls_token.expand(batch_size, 1, self.embed_dim)  # [B, 1, D]
+
+        # 1 numeric token from the full numeric feature vector
+        numeric_token = self.numeric_token_proj(numeric_features).unsqueeze(1)  # [B, 1, D]
+
+        # sequence: CLS + 10 draft tokens + 1 numeric token
+        x = torch.cat([cls_tokens, x, numeric_token], dim=1)  # [B, 12, D]
 
         x = self.encoder(x)
 
-        pooled = x[:, 0, :]
-        combined = torch.cat([pooled, numeric_features], dim=1)
-        logits = self.head(combined).squeeze(-1)
+        # final CLS representation
+        pooled = x[:, 0, :]  # [B, D]
 
+        logits = self.head(pooled).squeeze(-1)
         return logits

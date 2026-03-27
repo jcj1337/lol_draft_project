@@ -10,10 +10,6 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
-
-# -----------------------------
-# Config
-# -----------------------------
 DATA_DIR = Path("data/cleaned")
 OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -71,9 +67,6 @@ NUMERIC_FEATURE_COLS = [
 ]
 
 
-# -----------------------------
-# Utils
-# -----------------------------
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -152,9 +145,6 @@ def standardize_numeric_features(
     return train_df, val_df, test_df, mean, std
 
 
-# -----------------------------
-# Dataset / Model
-# -----------------------------
 class NumericOnlyDataset(Dataset):
     def __init__(self, df: pd.DataFrame):
         self.df = df.reset_index(drop=True)
@@ -206,9 +196,6 @@ def make_loader(df: pd.DataFrame, batch_size: int, shuffle: bool) -> DataLoader:
     )
 
 
-# -----------------------------
-# Train / Eval
-# -----------------------------
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -380,9 +367,6 @@ def print_calibration_report(
     print(f"Saved calibration plot to:  {output_plot_path.resolve()}")
 
 
-# -----------------------------
-# Main
-# -----------------------------
 def main() -> None:
     set_seed(SEED)
 
