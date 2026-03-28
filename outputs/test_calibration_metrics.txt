@@ -1,0 +1,4 @@
+Test ECE (10 bins): 0.006775
+Test ECE (20 bins): 0.009195
+Test MCE (10 bins): 0.097346
+Test Brier Score: 0.227339

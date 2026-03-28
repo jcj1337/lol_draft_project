@@ -3,12 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import random
-from xml.parsers.expat import model
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.pyplot as plt
-import pandas as pd
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -119,6 +116,75 @@ def compute_accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> 
     total = labels.numel()
     return correct / total
 
+# calibration
+
+def expected_calibration_error(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    y_true = np.asarray(y_true).astype(float)
+    y_prob = np.asarray(y_prob).astype(float)
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    n = len(y_true)
+
+    for i in range(n_bins):
+        left = bin_edges[i]
+        right = bin_edges[i + 1]
+
+        if i == n_bins - 1:
+            mask = (y_prob >= left) & (y_prob <= right)
+        else:
+            mask = (y_prob >= left) & (y_prob < right)
+
+        if not np.any(mask):
+            continue
+
+        bin_acc = y_true[mask].mean()
+        bin_conf = y_prob[mask].mean()
+        bin_weight = mask.sum() / n
+
+        ece += bin_weight * abs(bin_acc - bin_conf)
+
+    return float(ece)
+
+
+def maximum_calibration_error(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    y_true = np.asarray(y_true).astype(float)
+    y_prob = np.asarray(y_prob).astype(float)
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    mce = 0.0
+
+    for i in range(n_bins):
+        left = bin_edges[i]
+        right = bin_edges[i + 1]
+
+        if i == n_bins - 1:
+            mask = (y_prob >= left) & (y_prob <= right)
+        else:
+            mask = (y_prob >= left) & (y_prob < right)
+
+        if not np.any(mask):
+            continue
+
+        bin_acc = y_true[mask].mean()
+        bin_conf = y_prob[mask].mean()
+        mce = max(mce, abs(bin_acc - bin_conf))
+
+    return float(mce)
+
+
+def brier_score(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    y_true = np.asarray(y_true).astype(float)
+    y_prob = np.asarray(y_prob).astype(float)
+    return float(np.mean((y_prob - y_true) ** 2))
 
 def train_one_epoch(
     model: nn.Module,
@@ -191,7 +257,6 @@ def evaluate(
     return avg_loss, avg_acc
 
 
-@torch.no_grad()
 @torch.no_grad()
 def print_example_predictions(
     model: nn.Module,
@@ -435,11 +500,7 @@ def main() -> None:
     train_df, val_df, test_df, numeric_mean, numeric_std = standardize_numeric_features(
     train_df, val_df, test_df, NUMERIC_FEATURE_COLS
     )
-    # tester asdf 
-    #if TRAIN_SUBSET_ROWS is not None:
-    #    train_df = take_subset(train_df, TRAIN_SUBSET_ROWS)
-
-    # tester end 
+    
     print(f"Total rows: {len(df)}")
     print(f"Train rows: {len(train_df)}")
     print(f"Val rows:   {len(val_df)}")
@@ -509,6 +570,29 @@ def main() -> None:
         output_plot_path=calibration_plot_path,
         bin_width=0.05,
     )
+
+    # scalar calibration metrics
+    test_probs, test_labels = collect_probs_and_labels(model, test_loader, device)
+
+    ece_10 = expected_calibration_error(test_labels, test_probs, n_bins=10)
+    ece_20 = expected_calibration_error(test_labels, test_probs, n_bins=20)
+    mce_10 = maximum_calibration_error(test_labels, test_probs, n_bins=10)
+    brier = brier_score(test_labels, test_probs)
+
+    print(f"\nTest ECE (10 bins): {ece_10:.4f}")
+    print(f"Test ECE (20 bins): {ece_20:.4f}")
+    print(f"Test MCE (10 bins): {mce_10:.4f}")
+    print(f"Test Brier Score: {brier:.4f}")
+
+    metrics_path = OUTPUT_DIR / "test_calibration_metrics.txt"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        f.write(f"Test ECE (10 bins): {ece_10:.6f}\n")
+        f.write(f"Test ECE (20 bins): {ece_20:.6f}\n")
+        f.write(f"Test MCE (10 bins): {mce_10:.6f}\n")
+        f.write(f"Test Brier Score: {brier:.6f}\n")
+
+    print(f"Saved calibration metrics to: {metrics_path.resolve()}")
+
     print_example_predictions(model, test_df, champ_to_id, device, num_examples=5)
 
 
