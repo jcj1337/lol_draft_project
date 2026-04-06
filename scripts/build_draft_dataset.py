@@ -200,6 +200,9 @@ def collect_seed_puuids(
     puuids: set[str] = set()
 
     def maybe_cache_entry(entry: dict[str, Any]) -> None:
+        """ 
+        Stores each player’s wins, losses, games, win rate, tier, rank, and LP in the cache
+        """
         puuid = entry.get("puuid")
         if not puuid:
             return
