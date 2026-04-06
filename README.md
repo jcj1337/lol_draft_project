@@ -32,45 +32,36 @@ Riot’s raw match data is naturally stored in terms of **blue side** and **red 
 
 To avoid that, teams are converted into a **canonical `team_a` vs `team_b` format**, with both sides ordered consistently. The goal is to make the representation symmetric and prevent the same composition from being split into two different training cases solely because it appeared once on blue and once on red.
 
-For example, suppose the composition:
+This is best illustrated through an example, suppose the composition:
 - Aatrox, Udyr, Syndra, Jinx, Rakan
 
 appears on blue side in one game and on red side in another. If both are stored as raw blue/red outcomes, then the model effectively sees:
 - “blue side wins” once
 - “red side wins” once
 
-instead of learning that the **same composition won twice**.
+instead of learning that the **same composition won twice**. Could you see why this is a problem?
 
-Because the dataset is already limited by Riot API rate constraints, this matters a lot. Canonicalization prevents side information from artificially fragmenting the dataset and makes the effective learning problem more consistent.
+Because the dataset is already limited by Riot API rate constraints, this matters a lot. By introducing canonical teams, we are approximately doubling our data (truthfully it's probably more honest to describe this as “not halving” lol). 
 
 ---
 
 ### 3. **Standardization**
 Numeric features in this project live on very different scales. For example:
 - win-rate differences are usually tiny decimal values (e.g. `0.505` vs `0.506`)
-- games played can range from very small values up to the hundreds
+- games played can range from very small values up to the hundreds (e.g. `5` vs `500`)
 
-If these are fed directly into the model without scaling, larger-magnitude features can dominate optimization simply because of their units rather than because they are more informative.
+If these are fed directly into the model without scaling, bigger  features can dominate optimization simply because of their units. This is a problem.
 
 To address this, numeric features were standardized using the usual transformation:
 
-\[
-x' = \frac{x - \mu_{\text{train}}}{\sigma_{\text{train}}}
-\]
+x' = (x - μ_train) / σ_train
 
-where the mean and standard deviation were computed on the **training split only**.
-
-This was done carefully to avoid leakage:
-- fitted preprocessing statistics were computed from the **training split**
-- the **validation split** was used only for model selection
-- the **test split** was reserved for final evaluation
-
-So this is not a fancy trick, but it is an important correctness point: all learned preprocessing steps were fit on training data only.
+Of course this is all done on the training split only. All fitted preprocessing steps were computed on the training split- the validation split was used for model selection and the test split was reserved for final evaluation.
 
 ---
 
-### 4. **Draft Alone Was Weak**
-At the start of the project, I tried a very naive setup: use only the 10 drafted champions and the game result. Intuitively, this seemed like it might work, because draft should contain some predictive signal.
+### 4. **Draft alone is (basically) useless**
+At the start of the project, I tried a naive setup: use only the 10 drafted champions and the game result. Intuitively, this seemed like it might work, because draft should contain some predictive signal.
 
 In practice, it did not. A draft-only model produced probabilities clustered near `0.5` for most games and behaved close to random.
 
@@ -87,14 +78,14 @@ This motivated adding:
 
 These additions gave the model enough structure to move away from near-random behavior and produce meaningful probabilities.
 
-It is also worth noting that many of these abstractions were **hardcoded from domain knowledge**. For example, subclass labels such as bruiser, tank, enchanter, or mage were assigned manually rather than learned automatically. That is imperfect, but it still provided useful signal and made the draft representation more learnable.
+It is also worth noting that many of these abstractions were **hardcoded from domain knowledge**. For example, subclass labels such as bruiser, tank, enchanter, or mage were assigned manually rather than learned automatically. This is imperfect, (there’s probably a way to actually “classify” a champion as a bruiser quantitatively beyond even just typical item build, but this seems like a complex project in its own right?). Nonetheless we still got useful signal from this.
 
 ---
 
-### 5. **Late Fusion vs. Numeric Token**
-In the final model, numeric features bypass the transformer and are concatenated with the final draft representation after the encoder. Initially this was mostly a simplicity choice, but it later became an explicit architecture comparison.
+### 5. **Numeric features skip the model**
+This was initially motivated by laziness, but eventually I did test a variation where these were added into the model.
 
-Two variants were tested:
+ So to sum up, two variations were tested: 
 
 1. **Late fusion:** numeric features appended after the transformer  
 2. **Early fusion:** numeric features projected into a token and inserted into the transformer sequence
@@ -104,16 +95,17 @@ The early-fusion version did **not** show a meaningful benefit under matched set
 Because the more complex variant did not improve results, the final model kept the simpler **late-fusion** design:
 - easier to explain
 - easier to interpret
-- same or slightly better performance
+- TLDR: same sh*t
 
-The numeric-token experiment was still saved separately in its own Git branch.
+The latter is still saved under a different branch though (you can see it in Branches)
 
 ---
 
-### 6. **Why Calibration Mattered**
+### 6. **Philosophy of Calibration:**
 The main goal of the project was not just to predict which team would win, but to estimate a **usable pre-game win probability**.
+I think when we think about the actual goal of the project, i.e., what does a player want as a tool? We come back to the idea of a probability estimator, since at the end of the day no match is ever certain. In testing, most models like XGBoost and the logistic regression had similar log-loss scores, but differed in calibration.
 
-That distinction matters:
+This distinction matters:
 - **Accuracy** only tells us how often the model’s binary decision is correct.
 - **Log loss** measures overall probability quality.
 - **Calibration** checks whether predicted probabilities actually match realized frequencies.
@@ -125,5 +117,5 @@ The model was trained with **binary cross-entropy with logits**, which optimizes
 - Expected Calibration Error (ECE)
 - Brier score
 
-This ended up being one of the most important project takeaways. Several models, including logistic regression and XGBoost, achieved similar log-loss values, but differed more clearly in calibration quality. Since the intended use case is a pre-game probability estimator, calibration became the main lens through which final performance was interpreted.
+This ended up being one of the most important project takeaways. Several models, (again, including logistic regression and XGBoost), achieved similar log-loss values, but differed more clearly in calibration quality. Since the intended use case is a pre-game probability estimator, calibration became the main lens through which final performance was interpreted.
 
