@@ -4,3 +4,4 @@ python-dotenv
 jupyter
 torch
 matplotlib
+scikit-learn

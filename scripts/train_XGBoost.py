@@ -8,11 +8,11 @@ import random
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, log_loss
+from sklearn.metrics import accuracy_score, log_loss, brier_score_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 from xgboost import XGBClassifier
-
+from src.embedding_ids import load_cleaned_csv, build_champion_ids, DraftDataset, LABEL_COL, SCALING_TO_ID, SUBCLASS_TO_ID, TEAM_A_SCALING_COLS, TEAM_A_SUBCLASS_COLS, TEAM_B_SCALING_COLS, TEAM_B_SUBCLASS_COLS, NUMERIC_FEATURE_COLS
 
 # -----------------------------
 # Config
@@ -22,15 +22,13 @@ OUTPUT_DIR = Path("outputs/xgboost")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED = 42
-LABEL_COL = "team_a_win"
 
 # set to None for full train split
 TRAIN_SUBSET_ROWS = None
 
-# set to False if you just want one run
+# set to False for one run
 RUN_GRID_SEARCH = True
 
-# your likely feature columns from the cleaned set
 CATEGORICAL_FEATURE_COLS = [
     "patch",
     "team_a_top",
@@ -44,41 +42,6 @@ CATEGORICAL_FEATURE_COLS = [
     "team_b_adc",
     "team_b_sup",
 ]
-
-NUMERIC_FEATURE_COLS = [
-    "team_a_top_wr",
-    "team_a_jg_wr",
-    "team_a_mid_wr",
-    "team_a_adc_wr",
-    "team_a_sup_wr",
-    "team_b_top_wr",
-    "team_b_jg_wr",
-    "team_b_mid_wr",
-    "team_b_adc_wr",
-    "team_b_sup_wr",
-    "top_wr_diff",
-    "jg_wr_diff",
-    "mid_wr_diff",
-    "adc_wr_diff",
-    "sup_wr_diff",
-    "team_a_top_games",
-    "team_a_jg_games",
-    "team_a_mid_games",
-    "team_a_adc_games",
-    "team_a_sup_games",
-    "team_b_top_games",
-    "team_b_jg_games",
-    "team_b_mid_games",
-    "team_b_adc_games",
-    "team_b_sup_games",
-    "team_a_avg_games",
-    "team_b_avg_games",
-    "avg_games_diff",
-    "team_a_avg_wr",
-    "team_b_avg_wr",
-    "avg_wr_diff",
-]
-
 # small grid to start
 SEARCH_SPACE = {
     "n_estimators": [200, 400],
@@ -210,6 +173,91 @@ def evaluate_split(
     return loss, acc
 
 
+def compute_calibration_metrics(
+    y_true: pd.Series | np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
+) -> tuple[float, float]:
+    """
+    Returns:
+        ece: Expected Calibration Error
+        mce: Maximum Calibration Error
+    """
+    y_true = np.asarray(y_true).astype(int)
+    y_prob = np.asarray(y_prob)
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    mce = 0.0
+    n = len(y_true)
+
+    for i in range(n_bins):
+        left = bin_edges[i]
+        right = bin_edges[i + 1]
+
+        if i == n_bins - 1:
+            mask = (y_prob >= left) & (y_prob <= right)
+        else:
+            mask = (y_prob >= left) & (y_prob < right)
+
+        if not np.any(mask):
+            continue
+
+        bin_conf = y_prob[mask].mean()
+        bin_acc = y_true[mask].mean()
+        gap = abs(bin_acc - bin_conf)
+
+        ece += (mask.sum() / n) * gap
+        mce = max(mce, gap)
+
+    return ece, mce
+
+
+def get_calibration_metrics(
+    pipeline: Pipeline,
+    x: pd.DataFrame,
+    y: pd.Series,
+) -> dict[str, float]:
+    probs = pipeline.predict_proba(x)[:, 1]
+
+    ece_10, mce_10 = compute_calibration_metrics(y, probs, n_bins=10)
+    ece_20, _ = compute_calibration_metrics(y, probs, n_bins=20)
+    brier = brier_score_loss(y, probs)
+
+    return {
+        "Test ECE (10 bins)": ece_10,
+        "Test ECE (20 bins)": ece_20,
+        "Test MCE (10 bins)": mce_10,
+        "Test Brier Score": brier,
+    }
+
+
+def save_calibration_metrics(metrics: dict[str, float], output_path: Path) -> None:
+    with open(output_path, "w", encoding="utf-8") as f:
+        for key, value in metrics.items():
+            f.write(f"{key}: {value:.6f}\n")
+
+
+def print_example_predictions(
+    pipeline: Pipeline,
+    test_df: pd.DataFrame,
+    num_examples: int = 5,
+) -> None:
+    sample_df = test_df.head(num_examples).copy()
+    x_sample, y_sample = make_xy(sample_df)
+    probs = pipeline.predict_proba(x_sample)[:, 1]
+    preds = (probs >= 0.5).astype(int)
+
+    print("\nExample predictions:")
+    for i in range(len(sample_df)):
+        print(
+            f"Row {i:02d} | "
+            f"True: {int(y_sample.iloc[i])} | "
+            f"Pred: {int(preds[i])} | "
+            f"Prob(team_a_win=1): {probs[i]:.4f}"
+        )
+
+
 def run_one_config(
     config: dict,
     train_df: pd.DataFrame,
@@ -233,26 +281,6 @@ def run_one_config(
     }
 
     return pipeline, result
-
-
-def print_example_predictions(
-    pipeline: Pipeline,
-    test_df: pd.DataFrame,
-    num_examples: int = 5,
-) -> None:
-    sample_df = test_df.head(num_examples).copy()
-    x_sample, y_sample = make_xy(sample_df)
-    probs = pipeline.predict_proba(x_sample)[:, 1]
-    preds = (probs >= 0.5).astype(int)
-
-    print("\nExample predictions:")
-    for i in range(len(sample_df)):
-        print(
-            f"Row {i:02d} | "
-            f"True: {int(y_sample.iloc[i])} | "
-            f"Pred: {int(preds[i])} | "
-            f"Prob(team_a_win=1): {probs[i]:.4f}"
-        )
 
 
 def main() -> None:
@@ -321,6 +349,15 @@ def main() -> None:
         print(f"\nFinal Test Loss: {test_loss:.4f}")
         print(f"Final Test Accuracy: {test_acc:.4f}")
 
+        calibration_metrics = get_calibration_metrics(best_pipeline, x_test, y_test)
+        for key, value in calibration_metrics.items():
+            print(f"{key}: {value:.6f}")
+
+        save_calibration_metrics(
+            calibration_metrics,
+            OUTPUT_DIR / "test_calibration_metrics.txt",
+        )
+
         with open(OUTPUT_DIR / "best_xgboost_config.json", "w", encoding="utf-8") as f:
             json.dump(best_result, f, indent=2)
 
@@ -328,6 +365,10 @@ def main() -> None:
 
         print(f"\nSaved results to: {(OUTPUT_DIR / 'xgboost_results.csv').resolve()}")
         print(f"Saved best config to: {(OUTPUT_DIR / 'best_xgboost_config.json').resolve()}")
+        print(
+            f"Saved calibration metrics to: "
+            f"{(OUTPUT_DIR / 'test_calibration_metrics.txt').resolve()}"
+        )
 
     else:
         config = {
@@ -354,7 +395,21 @@ def main() -> None:
         print(f"\nFinal Test Loss: {test_loss:.4f}")
         print(f"Final Test Accuracy: {test_acc:.4f}")
 
+        calibration_metrics = get_calibration_metrics(pipeline, x_test, y_test)
+        for key, value in calibration_metrics.items():
+            print(f"{key}: {value:.6f}")
+
+        save_calibration_metrics(
+            calibration_metrics,
+            OUTPUT_DIR / "test_calibration_metrics.txt",
+        )
+
         print_example_predictions(pipeline, test_df, num_examples=5)
+
+        print(
+            f"\nSaved calibration metrics to: "
+            f"{(OUTPUT_DIR / 'test_calibration_metrics.txt').resolve()}"
+        )
 
 
 if __name__ == "__main__":
