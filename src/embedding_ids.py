@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
-# categorical
+#------------------------------ categorical ------------------------------
 TEAM_A_COLS = ["team_a_top", "team_a_jg", "team_a_mid", "team_a_adc", "team_a_sup"]
 TEAM_B_COLS = ["team_b_top", "team_b_jg", "team_b_mid", "team_b_adc", "team_b_sup"]
 
@@ -46,8 +46,7 @@ TEAM_B_SCALING_COLS = [
 
 LABEL_COL = "team_a_win"
 
-
-# numeric
+#------------------------------ numeric ------------------------------
 ROLE_IDS = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4]
 
 SUBCLASS_TO_ID = {
@@ -122,7 +121,7 @@ def load_cleaned_csv(csv_path: str | Path) -> pd.DataFrame:
 
 def build_champion_ids(df: pd.DataFrame) -> Dict[str, int]:
     """
-    Map champion name -> integer ID.
+    Map champion name to integer id, e.g., aatrox > 0, ahri > 1, etc.
     """
     champs = sorted({str(champ).strip() for col in ALL_CHAMP_COLS for champ in df[col].tolist()})
     champ_to_id = {champ: idx for idx, champ in enumerate(champs)}
@@ -133,7 +132,7 @@ class DraftDataset(Dataset):
     """
     Returns:
         champ_ids: shape [10]
-        team_ids:  shape [10]  -> first 5 are team A, last 5 are team B
+        team_ids:  shape [10]  where first 5 are team A and last 5 are team B
         label: scalar 0/1
     """
 
@@ -158,6 +157,7 @@ class DraftDataset(Dataset):
         team_ids = torch.tensor([0] * 5 + [1] * 5, dtype=torch.long)
         role_ids = torch.tensor(ROLE_IDS, dtype=torch.long)
 
+        # aggregate
         subclass_cols = TEAM_A_SUBCLASS_COLS + TEAM_B_SUBCLASS_COLS
         scaling_cols = TEAM_A_SCALING_COLS + TEAM_B_SCALING_COLS
 
@@ -191,7 +191,7 @@ class DraftDataset(Dataset):
 
 class DraftEmbeddingInput(nn.Module):
     """
-    Turns champion IDs into trainable embedding vectors.
+    Turns champion ids into trainable embedding vectors
 
     Output shape:
         [batch_size, 10, embed_dim]
@@ -221,31 +221,3 @@ class DraftEmbeddingInput(nn.Module):
         # Combine champion identity + which team they belong to (to model synergies + counters)
         x = champ_emb + team_emb
         return x
-
-
-if __name__ == "__main__":
-    csv_path = "data/cleaned/draft_dataset_na_emeraldplus_latest_patch_288_cleaned.csv"
-
-    df = load_cleaned_csv(csv_path)
-    champ_to_id = build_champion_ids(df)
-
-    print(f"Number of matches: {len(df)}")
-    print(f"Number of unique champions: {len(champ_to_id)}")
-
-    dataset = DraftDataset(df, champ_to_id)
-    loader = DataLoader(dataset, batch_size=8, shuffle=True)
-
-    batch = next(iter(loader))
-    print("champ_ids shape:", batch["champ_ids"].shape)  # [B, 10]
-    print("team_ids shape:", batch["team_ids"].shape)    # [b, 10]
-    print("label shape:", batch["label"].shape)          # [b]
-
-    embed_dim = 64
-    embedding_layer = DraftEmbeddingInput(
-        num_champions=len(champ_to_id),
-        embed_dim=embed_dim,
-    )
-
-    x = embedding_layer(batch["champ_ids"], batch["team_ids"])
-    # [batch size, # champions (always 10), embedding vector size]
-    print("embedding output shape:", x.shape)            # TEST: should be[8, 10, 64]

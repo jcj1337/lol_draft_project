@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader
 from src.embedding_ids import load_cleaned_csv, build_champion_ids, DraftDataset, TEAM_A_COLS, TEAM_B_COLS, LABEL_COL, SCALING_TO_ID, SUBCLASS_TO_ID, TEAM_A_SCALING_COLS, TEAM_A_SUBCLASS_COLS, TEAM_B_SCALING_COLS, TEAM_B_SUBCLASS_COLS, NUMERIC_FEATURE_COLS
 from src.model import DraftTransformer
 
-
 # dir
 DATA_DIR = Path("data/cleaned")
 OUTPUT_DIR = Path("outputs")

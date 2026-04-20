@@ -1,5 +1,6 @@
 import re
 
+# HAND CODED BTW. YES I AM OKAY. MR. PASSION DOES IT AGAIN.
 CHAMPION_PROFILE = {
     "aatrox": {"subclass": "bruiser", "damage_type": "ad", "range_type": "melee", "scaling_type": "mid"},
     "ahri": {"subclass": "mage", "damage_type": "ap", "range_type": "ranged", "scaling_type": "mid"},
