@@ -55,9 +55,9 @@ def take_subset(df: pd.DataFrame, n_rows: int) -> pd.DataFrame:
 
 def split_dataframe(
     df: pd.DataFrame,
-    train_frac: float = 0.8,
-    val_frac: float = 0.1,
-    test_frac: float = 0.1,
+    train_frac: float = 0.7,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -104,6 +104,10 @@ def standardize_numeric_features(
     test_df: pd.DataFrame,
     feature_cols: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """
+    Standardize features_cols in train/val/test returns new train/val/test dataframes, along with mean and std
+    """
+
     train_df = train_df.copy()
     val_df = val_df.copy()
     test_df = test_df.copy()
@@ -111,7 +115,7 @@ def standardize_numeric_features(
     mean = train_df[feature_cols].mean()
     std = train_df[feature_cols].std()
 
-    # avoid divide-by-zero 
+    # avoid divide by 0
     std = std.replace(0, 1.0)
 
     train_df[feature_cols] = (train_df[feature_cols] - mean) / std
@@ -121,31 +125,40 @@ def standardize_numeric_features(
     return train_df, val_df, test_df, mean, std
 
 def make_loader(df: pd.DataFrame, champ_to_id: dict[str, int], batch_size: int, shuffle: bool) -> DataLoader:
+    """
+    Returns dataloader for a given dataframe
+    """
     dataset = DraftDataset(df, champ_to_id)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
-
 def compute_accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    """
+    Compute accuracy from logits and outputs
+    """
     probs = torch.sigmoid(logits)
     preds = (probs >= 0.5).float()
     correct = (preds == labels).sum().item()
     total = labels.numel()
     return correct / total
 
-# calibration
-
 def expected_calibration_error(
     y_true: np.ndarray,
     y_prob: np.ndarray,
     n_bins: int = 10,
 ) -> float:
+    """
+    Computes and returns ECE as a float, takes in predictions, outputs, and number of bins
+    """
+    # convert to float
     y_true = np.asarray(y_true).astype(float)
     y_prob = np.asarray(y_prob).astype(float)
 
+    # bins from prob 0 to 1
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
     n = len(y_true)
 
+    # for each bin compare avg predicted bin_conf to actual fraction bin_acc
     for i in range(n_bins):
         left = bin_edges[i]
         right = bin_edges[i + 1]
@@ -161,7 +174,7 @@ def expected_calibration_error(
         bin_acc = y_true[mask].mean()
         bin_conf = y_prob[mask].mean()
         bin_weight = mask.sum() / n
-
+        # w * error
         ece += bin_weight * abs(bin_acc - bin_conf)
 
     return float(ece)
@@ -198,6 +211,9 @@ def maximum_calibration_error(
 
 
 def brier_score(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """
+    Literally just mse but we call it brier score in this context for probabilities
+    """
     y_true = np.asarray(y_true).astype(float)
     y_prob = np.asarray(y_prob).astype(float)
     return float(np.mean((y_prob - y_true) ** 2))
@@ -281,6 +297,9 @@ def print_example_predictions(
     device: torch.device,
     num_examples: int = 5,
 ) -> None:
+    """
+    Prints example predictions from the model on the first num_examples rows of the dataframe, showing team compositions, actual label, predicted probability, and predicted class
+    """
     print("\nExample predictions:")
 
     for i in range(min(num_examples, len(df))):
@@ -362,7 +381,7 @@ def plot_losses(train_losses: list[float], val_losses: list[float], out_path: Pa
     plt.savefig(out_path)
     plt.close()
 
-# Calibration functions 
+# Functions for calibration table and plot
 def collect_probs_and_labels(
     model: nn.Module,
     loader: torch.utils.data.DataLoader,
