@@ -92,12 +92,13 @@ This was initially motivated by laziness, but eventually I did test a variation 
 
 The early-fusion version did **not** show a meaningful benefit under matched settings. In fact, it was slightly weaker, although the difference was small.
 
-Because the more complex variant did not improve results, the final model kept the simpler **late-fusion** design:
+Because the more complex variant did not improve results, the final model kept the simpler **first** design:
 - easier to explain
 - easier to interpret
-- TLDR: same sh*t
+- TLDR: less code for the same plateau
 
-The latter is still saved under a different branch though (you can see it in Branches)
+The latter is still saved under a different branch though (you can see it in Branches!). This is a little less fancy since it means our numeric features are basically only
+interpreted by a simple MLP but oh well... The ends matter more than the means in life right? (disclaimer: this is not a reflection of my *actual* philosophy)
 
 ---
 
@@ -119,3 +120,7 @@ The model was trained with **binary cross-entropy with logits**, which optimizes
 
 This ended up being one of the most important project takeaways. Several models, (again, including logistic regression and XGBoost), achieved similar log-loss values, but differed more clearly in calibration quality. Since the intended use case is a pre-game probability estimator, calibration became the main lens through which final performance was interpreted.
 
+---
+
+### 7. **Parallelized API Calls**
+To optimize for throughput (since my Riot API calls are severely rate-limited), it made sense to parallelize data collection across independent regional routing buckets rather than query every region sequentially. Thus build_draft_dataset.py uses a ThreadPoolExecutor to launch one worker per region group; regions used (AMERICAS, EUROPE, ASIA, SEA) are queried at the *same* time, while shards within the same region are still processed sequentially to avoid violating *shared* rate limits.

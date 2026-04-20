@@ -470,8 +470,8 @@ def extract_row(
         "blue_win": blue_win,
     }
 
-# Run one worker per regional routing bucket
-# Match-v5 calls share the regional bucket, so this is the fastest sane parallelism
+# Run one worker per region
+# Match-v5 calls share the regional bucket, so this is fastest i think 
 MAX_REGION_WORKERS = 4
 
 def group_shards_by_region(shards: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
