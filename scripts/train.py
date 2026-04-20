@@ -37,12 +37,18 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 def find_latest_cleaned_csv(data_dir: Path) -> Path:
+    """
+    Find latest modified csv from /cleaned
+    """
     candidates = list(data_dir.glob("*_cleaned.csv"))
     if not candidates:
         raise FileNotFoundError(f"No cleaned CSV found in {data_dir.resolve()}")
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 def take_subset(df: pd.DataFrame, n_rows: int) -> pd.DataFrame:
+    """ 
+    Take the first n rows of a dataframe
+    """
     if n_rows > len(df):
         raise ValueError(f"Requested {n_rows} rows, but only have {len(df)}")
     return df.iloc[:n_rows].reset_index(drop=True)
@@ -54,32 +60,42 @@ def split_dataframe(
     test_frac: float = 0.1,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Shuffle and split a dataframe into train/val/test, returns new train/val/test dataframes
+    """
+
+    # slight input error checking
+
+    # sum to 1
     if abs(train_frac + val_frac + test_frac - 1.0) > 1e-9:
         raise ValueError("Train/val/test fractions must sum to 1.")
 
+    # atleaset 3 rows
     n = len(df)
     if n < 3:
         raise ValueError("Need at least 3 rows to make train/val/test split.")
 
+    val_size = max(1, round(val_frac * n))
+    test_size = max(1, round(test_frac * n))
+    train_size = n - val_size - test_size
+
+    #  val and test are at least 1, and thus checking on train is sufficient to ensure we can proceed
+    if train_size < 1:
+        raise ValueError(
+            f"Split too small. Got train={train_size}, val={val_size}, test={test_size}."
+        )
+
     rng = torch.Generator().manual_seed(seed)
     perm = torch.randperm(n, generator=rng).tolist()
 
-    train_end = int(train_frac * n)
-    val_end = train_end + int(val_frac * n)
-
-    train_idx = perm[:train_end]
-    val_idx = perm[train_end:val_end]
-    test_idx = perm[val_end:]
-
-    # for too small
-    if len(val_idx) == 0 or len(test_idx) == 0:
-        raise ValueError(
-            f"Split too small. Got train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}"
-        )
+    train_idx = perm[:train_size]
+    val_idx = perm[train_size : train_size + val_size]
+    test_idx = perm[train_size + val_size :]
 
     train_df = df.iloc[train_idx].reset_index(drop=True)
     val_df = df.iloc[val_idx].reset_index(drop=True)
     test_df = df.iloc[test_idx].reset_index(drop=True)
+
     return train_df, val_df, test_df
 
 def standardize_numeric_features(
