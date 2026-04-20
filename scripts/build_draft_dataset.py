@@ -38,17 +38,23 @@ SHARDS = [
 
 QUEUE = "RANKED_SOLO_5x5"
 QUEUE_ID = 420          # Ranked solo/duo id
+#------------- can edit these depending on how big df we want, probably can go around 150k matches before hitting 24 hours -------------
 TARGET_MATCHES = 110000 # Total target across all shards combined
 SEED_PLAYERS = 2500    # Number of players/shard to find (size related)
 MATCH_IDS_PER_PLAYER = 30  # How many matches/player
+# --------------------------------------------------------------------------------------------------------------------------------------
 RANDOM_SEED = 42
+
+#------------- change depending on patch -------------
 ALLOWED_PATCHES = {"16.5", "16.6"}
+#----------------------------------------------------
+
+# output dir
 OUT_DIR = Path("data/processed")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-MISSING_WR_VALUE = 0.5  # neutral fallback if current ranked info is missing
-ROLE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
-
+MISSING_WR_VALUE = 0.5  # if wr missing set to 50%
+ROLE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"] # why is support called utility i cannot answer this question thank you riot 
 
 def load_api_key() -> str:
     """
@@ -59,10 +65,7 @@ def load_api_key() -> str:
     if not api_key:
         raise RuntimeError("no api key found")
     return api_key
-
-
 API_KEY = load_api_key()
-
 
 # one session per worker thread
 _thread_local = threading.local()
@@ -150,7 +153,7 @@ def get_division_entries(
 
 def get_apex_entries(queue: str, tier: str, platform: str) -> list[dict[str, Any]]:
     """
-    Get player data for master/grandmaster/challenger on a given platform
+    Get player data for master/grandmaster/challenger on a given platform (cuz cringe api separated for 0)
     """
     endpoint = {
         "MASTER": "masterleagues",
@@ -194,7 +197,7 @@ def collect_seed_puuids(
     Get the initial set of player ids to use as starting points to find matches
 
     Also prefill the cache using the league entry data we already get here,
-    so we avoid some later by-puuid lookups for skill features
+    so we avoid later by-puuid lookups for skill features
     """
     rng = random.Random(RANDOM_SEED)
     puuids: set[str] = set()
@@ -552,7 +555,7 @@ def build_dataset_for_shard(shard: dict[str, str], target_matches: int) -> pd.Da
             print(f"[{platform} seed players] {i}/{len(seed_puuids)} -> {len(candidate_match_ids)} unique match ids")
 
         # oversample because some matches will be filtered out later
-        if len(candidate_match_ids) >= int(target_matches * 1.3):
+        if len(candidate_match_ids) >= int(target_matches * 1.3): # can look to change 1.3 multiplier
             break
 
     print(f"[{platform}] Fetched {len(candidate_match_ids)} candidate match ids")
@@ -627,12 +630,14 @@ def build_dataset() -> pd.DataFrame:
 
     dfs: list[pd.DataFrame] = []
 
+    # ThreadPoolExecutor to parallelize building across regions
     with ThreadPoolExecutor(max_workers=min(MAX_REGION_WORKERS, len(region_groups))) as executor:
         future_to_region = {
             executor.submit(build_region_group, region_name, shards, per_region_target): region_name
             for region_name, shards in region_groups.items()
         }
 
+        # when each region group finishes, get its dataframe and add to list for final concatanation
         for future in as_completed(future_to_region):
             region_name = future_to_region[future]
 
