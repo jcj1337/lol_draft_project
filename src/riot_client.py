@@ -26,6 +26,7 @@ DEFAULT_APP_LIMITS = [(20, 1.0), (100, 120.0)]
 
 KEY_POLL_SECONDS = 30
 KEY_REMINDER_SECONDS = 600
+KEY_PROBE_ROUTING = "na1"  # any platform works; used to tell an expired key from a forbidden request
 
 
 class CollectionStopped(Exception):
@@ -52,6 +53,7 @@ class RateLimiter:
         self._calls: deque[float] = deque()
         self._blocked_until = 0.0
         self._raw_limits: list[tuple[int, float]] = []
+        self._limits: list[tuple[int, float]] = []
         self.set_limits(limits)
 
     def set_limits(self, limits: list[tuple[int, float]]) -> None:
@@ -72,7 +74,7 @@ class RateLimiter:
                 raise CollectionStopped
             with self._lock:
                 now = time.monotonic()
-                longest = max(w for _, w in self._limits)
+                longest = max((w for _, w in self._limits), default=0.0)
                 while self._calls and now - self._calls[0] >= longest:
                     self._calls.popleft()
 
@@ -175,18 +177,49 @@ class RiotClient:
                 self._limiters[routing] = RateLimiter(DEFAULT_APP_LIMITS)
             return self._limiters[routing]
 
-    def get(self, routing: str, path: str, params: dict[str, Any] | None = None, max_retries: int = 8) -> Any:
+    def _key_works(self, key: str) -> bool | None:
+        """True/False if a cheap status call accepts/rejects `key`; None if the check itself failed."""
+        self.limiter(KEY_PROBE_ROUTING).acquire(self.stop)
+        try:
+            r = self._session().get(
+                f"https://{KEY_PROBE_ROUTING}.api.riotgames.com/lol/status/v4/platform-data",
+                headers={"X-Riot-Token": key},
+                timeout=30,
+            )
+        except requests.RequestException:
+            return None
+        if r.status_code in (401, 403):
+            return False
+        return True if r.status_code < 500 else None
+
+    def method_limiter(self, routing: str, method: str) -> RateLimiter:
+        """Per-endpoint limiter; starts unlimited and learns its limits from X-Method-Rate-Limit."""
+        name = f"{routing.lower()}:{method}"
+        with self._limiters_lock:
+            if name not in self._limiters:
+                self._limiters[name] = RateLimiter([])
+            return self._limiters[name]
+
+    def get(
+        self,
+        routing: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        method: str = "default",
+        max_retries: int = 8,
+    ) -> Any:
         """
-        GET https://{routing}.api.riotgames.com{path}. Raises requests.HTTPError for
-        400/404-style errors, CollectionStopped on shutdown.
+        GET https://{routing}.api.riotgames.com{path}. `method` names the endpoint for its own
+        rate limit. Raises requests.HTTPError for 400/404-style errors, CollectionStopped on shutdown.
         """
         url = f"https://{routing.lower()}.api.riotgames.com{path}"
         limiter = self.limiter(routing)
-        rejected_keys: set[str] = set()
+        method_limiter = self.method_limiter(routing, method)
         failures = 0
 
         while failures < max_retries:
             key = self.keys.get()
+            method_limiter.acquire(self.stop)
             limiter.acquire(self.stop)
             try:
                 r = self._session().get(url, params=params, headers={"X-Riot-Token": key}, timeout=30)
@@ -198,19 +231,25 @@ class RiotClient:
 
             if "X-App-Rate-Limit" in r.headers:
                 limiter.set_limits(parse_limit_header(r.headers["X-App-Rate-Limit"]))
+            if "X-Method-Rate-Limit" in r.headers:
+                method_limiter.set_limits(parse_limit_header(r.headers["X-Method-Rate-Limit"]))
 
             if r.status_code in (401, 403):
-                rejected_keys.add(key)
-                if len(rejected_keys) > 1:
-                    # rejected with two different keys: the endpoint itself is forbidden
+                # Riot also answers 403 for some bad requests, so check the key separately
+                key_ok = self._key_works(key)
+                if key_ok is None:
+                    failures += 1
+                    continue
+                if key_ok:
                     r.raise_for_status()
                 self.keys.reject(key)
                 continue
 
             if r.status_code == 429:
                 retry_after = float(r.headers.get("Retry-After", "5"))
-                log.info("429 (%s) on %s, waiting %.0fs", r.headers.get("X-Rate-Limit-Type", "?"), routing, retry_after)
-                limiter.block_for(retry_after + 1)
+                limit_type = r.headers.get("X-Rate-Limit-Type", "?")
+                log.info("429 (%s) on %s %s, waiting %.0fs", limit_type, routing, method, retry_after)
+                (method_limiter if limit_type == "method" else limiter).block_for(retry_after + 1)
                 continue
 
             if r.status_code >= 500:

@@ -7,6 +7,7 @@ Run from the project root:
 """
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -15,8 +16,8 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
+from src.draft_eval import compute_metrics, paired_bootstrap_ci, per_row_log_loss
 from src.draft_features import (
     LABEL_COL,
     ROLES,
@@ -31,7 +32,6 @@ from src.draft_features import (
 # -----------------------------
 RAW_CSV = Path("data/processed/draft_dataset_multiregion_diamondplus_110000.csv")
 OUTPUT_DIR = Path("outputs/draft_baseline")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED = 42
 
@@ -47,8 +47,6 @@ C_GRID = [0.003, 0.01, 0.03, 0.1, 0.3, 1.0]
 PAIR_SCALE_GRID = [0.25, 0.5, 1.0]
 MIN_PAIR_COUNT = 10
 
-N_BOOTSTRAP = 2000
-
 # example rankings
 N_EXAMPLE_DRAFTS = 5
 N_SPREAD_DRAFTS = 300          # drafts per role used to summarize how much the pick matters
@@ -57,41 +55,6 @@ N_SPREAD_DRAFTS = 300          # drafts per role used to summarize how much the 
 MIN_CANDIDATE_PICK_RATE = 0.01
 
 WR_COLS = [f"{side}_{r}_wr" for side in ("blue", "red") for r in ROLES]
-
-
-# -----------------------------
-# Metrics
-# -----------------------------
-def ece_quantile(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> float:
-    """ECE with equal-count bins (equal-width bins are uninformative when predictions sit near 0.5)."""
-    order = np.argsort(p)
-    bins = np.array_split(order, n_bins)
-    return float(sum(len(b) / len(p) * abs(p[b].mean() - y[b].mean()) for b in bins))
-
-
-def compute_metrics(y: np.ndarray, p: np.ndarray) -> dict[str, float]:
-    return {
-        "log_loss": log_loss(y, p, labels=[0, 1]),
-        "brier": brier_score_loss(y, p),
-        "auc": roc_auc_score(y, p) if np.std(p) > 0 else 0.5,
-        "accuracy": float(((p > 0.5) == y).mean()),
-        "ece_q10": ece_quantile(y, p),
-        "pred_std": float(np.std(p)),
-    }
-
-
-def per_row_log_loss(y: np.ndarray, p: np.ndarray) -> np.ndarray:
-    p = np.clip(p, 1e-15, 1 - 1e-15)
-    return -(y * np.log(p) + (1 - y) * np.log(1 - p))
-
-
-def paired_bootstrap_ci(loss_a: np.ndarray, loss_b: np.ndarray, seed: int) -> tuple[float, float, float]:
-    """Mean of (loss_a - loss_b) with a 95% bootstrap CI. Positive means model b is better."""
-    rng = np.random.default_rng(seed)
-    diff = loss_a - loss_b
-    n = len(diff)
-    means = np.array([diff[rng.integers(0, n, n)].mean() for _ in range(N_BOOTSTRAP)])
-    return float(diff.mean()), float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 
 # -----------------------------
@@ -300,6 +263,14 @@ def champion_role_table(feat: DraftFeaturizer, model: LogisticRegression) -> pd.
 # Main
 # -----------------------------
 def main() -> None:
+    global RAW_CSV, OUTPUT_DIR
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--csv", type=Path, default=RAW_CSV, help="raw blue/red draft CSV (e.g. a collect_drafts export)")
+    parser.add_argument("--out", type=Path, default=OUTPUT_DIR, help="output directory")
+    args = parser.parse_args()
+    RAW_CSV, OUTPUT_DIR = args.csv, args.out
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     df = load_raw_drafts(RAW_CSV)
     train_df, val_df, test_df = time_split(df)
     trainval_df = pd.concat([train_df, val_df], ignore_index=True)
@@ -351,10 +322,11 @@ def main() -> None:
             comparisons.append({"model": name, "vs": ref, "log_loss_improvement": mean, "ci95_low": lo, "ci95_high": hi})
     comparisons_df = pd.DataFrame(comparisons)
 
-    # leakage check, using champ_role's tuned C
-    leak = run_leakage_check(train_df, val_df, test_df, best_configs["champ_role"]["C"])
-    for split_name, m in leak.items():
-        results.append({"model": "LEAKY champ_role+current_wr", "split": split_name, **m})
+    # leakage check, using champ_role's tuned C (only the old dataset has win-rate columns)
+    if set(WR_COLS) <= set(pd.read_csv(RAW_CSV, nrows=0).columns):
+        leak = run_leakage_check(train_df, val_df, test_df, best_configs["champ_role"]["C"])
+        for split_name, m in leak.items():
+            results.append({"model": "LEAKY champ_role+current_wr", "split": split_name, **m})
 
     results_df = pd.DataFrame(results)
     results_df.to_csv(OUTPUT_DIR / "results.csv", index=False)

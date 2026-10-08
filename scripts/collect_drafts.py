@@ -67,7 +67,8 @@ DEFAULT_LOOKBACK_DAYS = 14
 ROSTER_MAX_AGE_HOURS = 24
 ROSTER_CHECK_SECONDS = 600
 ROSTER_CURRENT_HOURS = 36          # players seen in a refresh this recent count as Diamond+
-MIN_RECRAWL_HOURS = 6              # don't re-list a player's matches more often than this
+MIN_RECRAWL_HOURS = 6              # don't re-list an active player's matches more often than this
+INACTIVE_RECRAWL_HOURS = 48        # players whose last crawl found no games are re-checked less often
 RECRAWL_OVERLAP_SECONDS = 2 * 3600 # re-list a bit before the last crawl to catch games in progress
 PLAYER_BATCH = 200
 IDLE_WAIT_SECONDS = 60
@@ -109,6 +110,7 @@ CREATE TABLE IF NOT EXISTS roster (
     tier     TEXT,
     division TEXT,
     lp       INTEGER,
+    games    INTEGER,                  -- season games; only used to crawl active players first
     seen_at  INTEGER NOT NULL,
     PRIMARY KEY (platform, puuid)
 );
@@ -119,6 +121,7 @@ CREATE TABLE IF NOT EXISTS progress (
     puuid         TEXT NOT NULL,
     crawled_until INTEGER,             -- unix seconds; matches before this were listed
     last_attempt  INTEGER NOT NULL,
+    found         INTEGER,             -- match ids listed by the last crawl
     PRIMARY KEY (platform, puuid)
 );
 
@@ -132,7 +135,8 @@ CREATE TABLE IF NOT EXISTS meta (
 # -----------------------------
 # Database
 # -----------------------------
-def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
+def connect(db_path: Path | None = None) -> sqlite3.Connection:
+    db_path = db_path or DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -142,6 +146,11 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # columns added after the first version of the schema
+    for table, column in (("roster", "games INTEGER"), ("progress", "found INTEGER")):
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column.split()[0] not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
     conn.commit()
 
 
@@ -229,24 +238,25 @@ def refresh_roster(client: RiotClient, conn: sqlite3.Connection, platform: str) 
     def store(entries: list[dict[str, Any]], tier: str) -> None:
         nonlocal n
         rows = [
-            (platform, e["puuid"], tier, e.get("rank"), e.get("leaguePoints"), started)
+            (platform, e["puuid"], tier, e.get("rank"), e.get("leaguePoints"),
+             int(e.get("wins", 0)) + int(e.get("losses", 0)), started)
             for e in entries if e.get("puuid")
         ]
         conn.executemany(
-            "INSERT OR REPLACE INTO roster (platform, puuid, tier, division, lp, seen_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO roster (platform, puuid, tier, division, lp, games, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()
         n += len(rows)
 
     for tier, endpoint in APEX_TIERS.items():
-        league = client.get(platform, f"/lol/league/v4/{endpoint}/by-queue/{QUEUE}")
+        league = client.get(platform, f"/lol/league/v4/{endpoint}/by-queue/{QUEUE}", method=f"league-{endpoint}")
         store(league.get("entries", []), tier)
 
     for division in DIAMOND_DIVISIONS:
         page = 1
         while True:
-            entries = client.get(platform, f"/lol/league/v4/entries/{QUEUE}/DIAMOND/{division}", {"page": page})
+            entries = client.get(platform, f"/lol/league/v4/entries/{QUEUE}/DIAMOND/{division}", {"page": page}, method="league-entries")
             if not entries:
                 break
             store(entries, "DIAMOND")
@@ -305,11 +315,14 @@ def next_players(conn: sqlite3.Connection, platforms: list[str]) -> list[tuple[s
         LEFT JOIN progress p ON p.platform = r.platform AND p.puuid = r.puuid
         WHERE r.platform IN ({placeholders})
           AND r.seen_at >= ?
-          AND (p.last_attempt IS NULL OR p.last_attempt < ?)
-        ORDER BY p.last_attempt IS NOT NULL, p.last_attempt, RANDOM()
+          AND (p.last_attempt IS NULL
+               OR p.last_attempt < CASE WHEN COALESCE(p.found, 1) > 0 THEN ? ELSE ? END)
+        -- never-crawled players first, most season games first; then the longest-waiting
+        ORDER BY p.last_attempt IS NOT NULL, COALESCE(r.games, 0) DESC, p.last_attempt
         LIMIT ?
         """,
-        (*platforms, now - ROSTER_CURRENT_HOURS * 3600, now - MIN_RECRAWL_HOURS * 3600, PLAYER_BATCH),
+        (*platforms, now - ROSTER_CURRENT_HOURS * 3600,
+         now - MIN_RECRAWL_HOURS * 3600, now - INACTIVE_RECRAWL_HOURS * 3600, PLAYER_BATCH),
     ).fetchall()
 
 
@@ -321,6 +334,7 @@ def list_match_ids(client: RiotClient, region: str, puuid: str, start_time: int)
             region,
             f"/lol/match/v5/matches/by-puuid/{puuid}/ids",
             {"startTime": start_time, "queue": QUEUE_ID, "type": "ranked", "start": start, "count": 100},
+            method="match-ids",
         )
         ids += page
         if len(page) < 100:
@@ -329,6 +343,7 @@ def list_match_ids(client: RiotClient, region: str, puuid: str, start_time: int)
 
 
 def unseen(conn: sqlite3.Connection, match_ids: list[str]) -> list[str]:
+    match_ids = list(dict.fromkeys(match_ids))
     if not match_ids:
         return []
     placeholders = ",".join("?" * len(match_ids))
@@ -384,7 +399,7 @@ def crawl_player(
     if match_ids is not None:
         for match_id in unseen(conn, match_ids):
             try:
-                row = parse_match(client.get(region, f"/lol/match/v5/matches/{match_id}"), region)
+                row = parse_match(client.get(region, f"/lol/match/v5/matches/{match_id}", method="match"), region)
                 store_match(conn, row)
                 stats.add(stats.stored, region)
             except SkipMatch as e:
@@ -399,8 +414,9 @@ def crawl_player(
 
     # only mark the player done once all of their new matches are stored
     conn.execute(
-        "INSERT OR REPLACE INTO progress (platform, puuid, crawled_until, last_attempt) VALUES (?, ?, ?, ?)",
-        (platform, puuid, crawl_started if match_ids is not None else crawled_until, crawl_started),
+        "INSERT OR REPLACE INTO progress (platform, puuid, crawled_until, last_attempt, found) VALUES (?, ?, ?, ?, ?)",
+        (platform, puuid, crawl_started if match_ids is not None else crawled_until, crawl_started,
+         len(match_ids) if match_ids is not None else None),
     )
     conn.commit()
     stats.add(stats.players, region)
@@ -411,7 +427,10 @@ def region_worker(client: RiotClient, region: str, platforms: list[str], since: 
     idle_logged = False
     while not stop.is_set():
         try:
-            batch = next_players(conn, platforms)
+            # only crawl platforms whose Diamond+ roster finished loading at least once,
+            # so n_diamond_plus is counted against a complete roster
+            ready = [p for p in platforms if get_meta(conn, f"roster_refreshed:{p}")]
+            batch = next_players(conn, ready) if ready else []
             if not batch:
                 if not idle_logged:
                     log.info("[%s] no players due for a crawl (roster loading, or caught up); waiting", region)

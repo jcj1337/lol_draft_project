@@ -51,13 +51,17 @@ def load_raw_drafts(csv_path: str | Path, min_major_patch: int = 16) -> pd.DataF
     Load the raw (blue/red) dataset produced by build_draft_dataset.py, keeping only
     draft columns. Patch is read as a string: as a float, "16.1" and "16.10" collide.
     """
-    keep = ["match_id", "source_platform", "patch", *BLUE_COLS, *RED_COLS, LABEL_COL]
-    df = pd.read_csv(csv_path, usecols=keep, dtype={"patch": str})
+    keep = {"match_id", "source_platform", "patch", "game_creation", *BLUE_COLS, *RED_COLS, LABEL_COL}
+    df = pd.read_csv(csv_path, usecols=lambda c: c in keep, dtype={"patch": str})
 
     df["patch_major"] = df["patch"].str.split(".").str[0].astype(int)
     df["patch_minor"] = df["patch"].str.split(".").str[1].astype(int)
-    # match ids increase over time within a platform, e.g. NA1_5516057846
-    df["match_num"] = df["match_id"].str.split("_").str[1].astype(np.int64)
+    if "game_creation" in df.columns:
+        # collect_drafts.py exports have a real timestamp
+        df["time_order"] = df["game_creation"].astype(np.int64)
+    else:
+        # older datasets: match ids increase over time within a platform, e.g. NA1_5516057846
+        df["time_order"] = df["match_id"].str.split("_").str[1].astype(np.int64)
 
     df = df[df["patch_major"] >= min_major_patch]
     df = df.drop_duplicates("match_id").reset_index(drop=True)
@@ -82,8 +86,8 @@ def time_split(
     test_mask = df["patch"] == test_patch
     in_val_patch = df["patch"] == val_patch
 
-    # rank games within each platform by match id, newest last
-    pct = df[in_val_patch].groupby("source_platform")["match_num"].rank(pct=True)
+    # rank games within each platform by time, newest last
+    pct = df[in_val_patch].groupby("source_platform")["time_order"].rank(pct=True)
     val_mask = pd.Series(False, index=df.index)
     val_mask.loc[pct.index] = pct > (1.0 - val_frac_of_second_latest)
 
