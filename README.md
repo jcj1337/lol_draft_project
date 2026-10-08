@@ -1,6 +1,6 @@
 
 ## LoL Draft Probability Estimator
-**New here? Start with [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md)**: the current draft-only pipeline (data collector, models, results, known gaps). The notes below describe the original version of the project; its player win-rate features turned out to leak the match result (explained in the overview).
+**New here? Start with [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md)**: the current draft-only pipeline (data collector, models, results, known gaps).
 
 "/reports" contains the project proposal and progress reports. lol_draft_project_docs goes more in-depth on why certain things were done along with dated progress (there is more passion here)
 
