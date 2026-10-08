@@ -100,41 +100,52 @@ def time_split(
 
 
 # ------------------------------ features ------------------------------
-def draft_terms(blue: dict[str, str], red: dict[str, str], groups: list[str]) -> list[tuple[tuple, float]]:
+def draft_terms(
+    blue: dict[str, str | None],
+    red: dict[str, str | None],
+    groups: list[str],
+) -> list[tuple[tuple, float]]:
     """
     Return (feature key, value) terms for one draft.
-    `blue` and `red` map role -> champion name.
+    `blue` and `red` map role -> champion name. A missing (None) champion, e.g. a pick that has
+    not happened yet, contributes no terms, i.e. it is treated like an average champion.
     """
     terms: list[tuple[tuple, float]] = []
 
+    def add(key: tuple, value: float) -> None:
+        if None not in key:
+            terms.append((key, value))
+
     if "champ" in groups:
         for r in ROLES:
-            terms.append((("champ", blue[r]), 1.0))
-            terms.append((("champ", red[r]), -1.0))
+            add(("champ", blue.get(r)), 1.0)
+            add(("champ", red.get(r)), -1.0)
 
     if "champ_role" in groups:
         for r in ROLES:
-            terms.append((("champ_role", r, blue[r]), 1.0))
-            terms.append((("champ_role", r, red[r]), -1.0))
+            add(("champ_role", r, blue.get(r)), 1.0)
+            add(("champ_role", r, red.get(r)), -1.0)
 
     if "matchup" in groups:
         for r1, r2 in MATCHUP_PAIRS:
             if r1 == r2:
                 # one key per unordered pair; sign says which side has the first champion
-                a, b = blue[r1], red[r1]
+                a, b = blue.get(r1), red.get(r1)
+                if a is None or b is None:
+                    continue
                 if a <= b:
-                    terms.append((("matchup", r1, r2, a, b), 1.0))
+                    add(("matchup", r1, r2, a, b), 1.0)
                 else:
-                    terms.append((("matchup", r1, r2, b, a), -1.0))
+                    add(("matchup", r1, r2, b, a), -1.0)
             else:
                 # ordered key (r1 champ, r2 champ); blue r1 vs red r2 is +1, red r1 vs blue r2 is -1
-                terms.append((("matchup", r1, r2, blue[r1], red[r2]), 1.0))
-                terms.append((("matchup", r1, r2, red[r1], blue[r2]), -1.0))
+                add(("matchup", r1, r2, blue.get(r1), red.get(r2)), 1.0)
+                add(("matchup", r1, r2, red.get(r1), blue.get(r2)), -1.0)
 
     if "synergy" in groups:
         for r1, r2 in SYNERGY_PAIRS:
-            terms.append((("synergy", r1, r2, blue[r1], blue[r2]), 1.0))
-            terms.append((("synergy", r1, r2, red[r1], red[r2]), -1.0))
+            add(("synergy", r1, r2, blue.get(r1), blue.get(r2)), 1.0)
+            add(("synergy", r1, r2, red.get(r1), red.get(r2)), -1.0)
 
     return terms
 
