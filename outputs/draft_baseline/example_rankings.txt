@@ -1,0 +1,81 @@
+Example rankings from model: champ_role+matchup+synergy
+Red side picks the hidden role; the other 9 picks are fixed.
+
+--- EUW1_7786015070 | red top | actual pick: Urgot | red won: 1
+Blue: top=Gnar, jg=Fizz, mid=Ahri, adc=Samira, sup=Karma
+Red:  top=???, jg=Naafiri, mid=Ryze, adc=Ezreal, sup=Bard
+  Anivia         0.534
+  Kennen         0.526
+  Kayle          0.522
+  Riven          0.519
+  Poppy          0.518
+  ...
+  Mordekaiser    0.472
+  Sett           0.468
+  Volibear       0.465
+  actual pick Urgot: rank 15/50, win_prob 0.504
+
+--- KR_8139364052 | red jg | actual pick: LeeSin | red won: 1
+Blue: top=Sion, jg=Pantheon, mid=Yasuo, adc=Ezreal, sup=Leona
+Red:  top=Zaahen, jg=???, mid=Ahri, adc=Ashe, sup=Poppy
+  Belveth        0.594
+  Shaco          0.592
+  RekSai         0.580
+  Ivern          0.576
+  Taliyah        0.575
+  ...
+  Fizz           0.518
+  Viego          0.516
+  Malphite       0.513
+  actual pick LeeSin: rank 21/50, win_prob 0.552
+
+--- EUW1_7787517718 | red mid | actual pick: Azir | red won: 0
+Blue: top=Irelia, jg=Nocturne, mid=Syndra, adc=Caitlyn, sup=Nami
+Red:  top=Malphite, jg=Khazix, mid=???, adc=Jhin, sup=Bard
+  Zoe            0.509
+  Annie          0.502
+  Veigar         0.501
+  Taliyah        0.501
+  Talon          0.500
+  ...
+  Mel            0.453
+  Ryze           0.439
+  Azir           0.434
+  actual pick Azir: rank 42/42, win_prob 0.434
+
+--- NA1_5515581128 | red adc | actual pick: Draven | red won: 0
+Blue: top=Ambessa, jg=Graves, mid=Talon, adc=Swain, sup=Gragas
+Red:  top=Malphite, jg=Aatrox, mid=Yone, adc=???, sup=Leona
+  AurelionSol    0.480
+  Lux            0.477
+  Veigar         0.470
+  Velkoz         0.468
+  Seraphine      0.456
+  ...
+  Jhin           0.415
+  Aphelios       0.413
+  Kaisa          0.399
+  actual pick Draven: rank 15/34, win_prob 0.442
+
+--- KR_8138637547 | red sup | actual pick: Neeko | red won: 1
+Blue: top=Garen, jg=Ambessa, mid=Ryze, adc=Ezreal, sup=Yuumi
+Red:  top=Shyvana, jg=Pantheon, mid=Diana, adc=Jinx, sup=???
+  Thresh         0.608
+  Braum          0.597
+  Elise          0.594
+  Nautilus       0.590
+  Bard           0.589
+  ...
+  Zyra           0.546
+  Xerath         0.539
+  Swain          0.534
+  actual pick Neeko: rank 11/36, win_prob 0.583
+
+Median over test drafts of how much the hidden pick moves red's win probability:
+      n_candidates  best_minus_worst  best_minus_actual    std
+role                                                          
+top        50.0000            0.0645             0.0339 0.0138
+jg         50.0000            0.0822             0.0427 0.0186
+mid        42.0000            0.0772             0.0258 0.0170
+adc        34.0000            0.0797             0.0540 0.0195
+sup        37.0000            0.0661             0.0209 0.0172
