@@ -1,20 +1,25 @@
 """
-Draft-only match collector for Diamond+ ranked solo/duo.
+Draft-only match collector for ranked solo/duo, crawling Diamond+ players (default) or
+Emerald players (scripts.collect_emerald, run on a second machine with its own key).
 
 How it works:
   1. Roster threads (one per platform, e.g. NA1) download the full Diamond+ ladder once a
-     day. League-v4 runs on the platform rate limit, separate from match-v5.
-  2. Region threads (one per match-v5 routing region, e.g. AMERICAS) crawl roster players:
-     list their ranked match ids since `--since` (or since their last crawl), fetch matches
-     we have not seen, and store one row per match in SQLite as soon as it arrives.
+     day, plus Emerald I-IV when crawling Emerald. League-v4 runs on the platform rate
+     limit, separate from match-v5.
+  2. Region threads (one per match-v5 routing region, e.g. AMERICAS) crawl roster players
+     of the crawled ladder: list their ranked match ids since `--since` (or since their last
+     crawl), fetch matches we have not seen, and store one row per match in SQLite as soon
+     as it arrives.
   3. When the API key expires, everything pauses until a new key appears in .env.
 
-Everything is resumable: stop with Ctrl+C at any time and start again later.
+Everything is resumable: stop with Ctrl+C at any time and start again later. Each ladder
+has its own database, so the Emerald collector never touches the Diamond+ one.
 
 Run from the project root:
     python -m scripts.collect_drafts collect [--since YYYY-MM-DD]
     python -m scripts.collect_drafts status
-    python -m scripts.collect_drafts export [--min-diamond 8] [--out path.csv]
+    python -m scripts.collect_drafts export [--min-diamond 8 | --min-emerald-plus 8] [--out path.csv]
+    python -m scripts.collect_drafts merge path/to/pack.sqlite   # add games from the Emerald collector
 """
 from __future__ import annotations
 
@@ -56,12 +61,21 @@ REGIONS: dict[str, list[str]] = {
     "ASIA": ["KR", "JP1"],
     "SEA": ["OC1", "SG2", "TW2", "VN2"],
 }
-DIAMOND_DIVISIONS = ["I", "II", "III", "IV"]
+DIVISIONS = ["I", "II", "III", "IV"]
 APEX_TIERS = {
     "MASTER": "masterleagues",
     "GRANDMASTER": "grandmasterleagues",
     "CHALLENGER": "challengerleagues",
 }
+
+# ladder -> tiers whose players are crawled. The Diamond+ ladder is always downloaded, so
+# n_diamond_plus means the same in every database.
+LADDERS: dict[str, list[str]] = {
+    "diamond_plus": ["DIAMOND", *APEX_TIERS],
+    "emerald": ["EMERALD"],
+}
+LADDER_LABELS = {"diamond_plus": "Diamond+", "emerald": "Emerald"}
+LADDER = "diamond_plus"  # switched by use_ladder()
 
 DEFAULT_LOOKBACK_DAYS = 14
 ROSTER_MAX_AGE_HOURS = 24
@@ -95,7 +109,9 @@ CREATE TABLE IF NOT EXISTS matches (
     red_bans        TEXT NOT NULL,
     puuids          TEXT NOT NULL,      -- JSON, blue top..sup then red top..sup
     n_diamond_plus  INTEGER NOT NULL,   -- how many of the 10 players were on our Diamond+ roster
-    collected_at    INTEGER NOT NULL
+    collected_at    INTEGER NOT NULL,
+    n_emerald       INTEGER,            -- how many were Emerald; NULL unless the Emerald ladder was downloaded
+    crawled_from    TEXT NOT NULL DEFAULT 'diamond_plus'  -- ladder whose players led us to this game
 );
 CREATE INDEX IF NOT EXISTS idx_matches_patch ON matches (patch);
 
@@ -135,6 +151,15 @@ CREATE TABLE IF NOT EXISTS meta (
 # -----------------------------
 # Database
 # -----------------------------
+def use_ladder(ladder: str) -> None:
+    """Crawl `ladder` instead of Diamond+, with its own database and log."""
+    global LADDER, DB_PATH, LOG_PATH
+    LADDER = ladder
+    suffix = "" if ladder == "diamond_plus" else f"_{ladder}"
+    DB_PATH = DATA_DIR / f"drafts{suffix}.sqlite"
+    LOG_PATH = DATA_DIR / f"collector{suffix}.log"
+
+
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     db_path = db_path or DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +172,12 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     # columns added after the first version of the schema
-    for table, column in (("roster", "games INTEGER"), ("progress", "found INTEGER")):
+    for table, column in (
+        ("roster", "games INTEGER"),
+        ("progress", "found INTEGER"),
+        ("matches", "n_emerald INTEGER"),
+        ("matches", "crawled_from TEXT NOT NULL DEFAULT 'diamond_plus'"),
+    ):
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column.split()[0] not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
@@ -253,14 +283,15 @@ def refresh_roster(client: RiotClient, conn: sqlite3.Connection, platform: str) 
         league = client.get(platform, f"/lol/league/v4/{endpoint}/by-queue/{QUEUE}", method=f"league-{endpoint}")
         store(league.get("entries", []), tier)
 
-    for division in DIAMOND_DIVISIONS:
-        page = 1
-        while True:
-            entries = client.get(platform, f"/lol/league/v4/entries/{QUEUE}/DIAMOND/{division}", {"page": page}, method="league-entries")
-            if not entries:
-                break
-            store(entries, "DIAMOND")
-            page += 1
+    for tier in ["DIAMOND"] + (["EMERALD"] if LADDER == "emerald" else []):
+        for division in DIVISIONS:
+            page = 1
+            while True:
+                entries = client.get(platform, f"/lol/league/v4/entries/{QUEUE}/{tier}/{division}", {"page": page}, method="league-entries")
+                if not entries:
+                    break
+                store(entries, tier)
+                page += 1
 
     set_meta(conn, f"roster_refreshed:{platform}", str(started))
     return n
@@ -272,7 +303,7 @@ def roster_worker(client: RiotClient, platform: str, stop: threading.Event) -> N
         try:
             last = int(get_meta(conn, f"roster_refreshed:{platform}") or 0)
             if time.time() - last >= ROSTER_MAX_AGE_HOURS * 3600:
-                log.info("[%s] refreshing Diamond+ roster", platform)
+                log.info("[%s] refreshing roster", platform)
                 n = refresh_roster(client, conn, platform)
                 log.info("[%s] roster refreshed: %d players", platform, n)
         except CollectionStopped:
@@ -308,12 +339,14 @@ class Stats:
 def next_players(conn: sqlite3.Connection, platforms: list[str]) -> list[tuple[str, str, int | None]]:
     now = int(time.time())
     placeholders = ",".join("?" * len(platforms))
+    tiers = LADDERS[LADDER]
     return conn.execute(
         f"""
         SELECT r.platform, r.puuid, p.crawled_until
         FROM roster r
         LEFT JOIN progress p ON p.platform = r.platform AND p.puuid = r.puuid
         WHERE r.platform IN ({placeholders})
+          AND r.tier IN ({",".join("?" * len(tiers))})
           AND r.seen_at >= ?
           AND (p.last_attempt IS NULL
                OR p.last_attempt < CASE WHEN COALESCE(p.found, 1) > 0 THEN ? ELSE ? END)
@@ -321,7 +354,7 @@ def next_players(conn: sqlite3.Connection, platforms: list[str]) -> list[tuple[s
         ORDER BY p.last_attempt IS NOT NULL, COALESCE(r.games, 0) DESC, p.last_attempt
         LIMIT ?
         """,
-        (*platforms, now - ROSTER_CURRENT_HOURS * 3600,
+        (*platforms, *tiers, now - ROSTER_CURRENT_HOURS * 3600,
          now - MIN_RECRAWL_HOURS * 3600, now - INACTIVE_RECRAWL_HOURS * 3600, PLAYER_BATCH),
     ).fetchall()
 
@@ -357,16 +390,20 @@ def unseen(conn: sqlite3.Connection, match_ids: list[str]) -> list[str]:
     return [m for m in match_ids if m not in seen]
 
 
-def count_diamond_plus(conn: sqlite3.Connection, platform: str, puuids: list[str]) -> int:
+def count_tiers(conn: sqlite3.Connection, platform: str, puuids: list[str]) -> tuple[int, int | None]:
+    """(Diamond+ players, Emerald players); the Emerald count is None unless that ladder is downloaded."""
     placeholders = ",".join("?" * len(puuids))
-    return conn.execute(
-        f"SELECT COUNT(*) FROM roster WHERE platform = ? AND puuid IN ({placeholders})",
+    counts = dict(conn.execute(
+        f"SELECT tier, COUNT(*) FROM roster WHERE platform = ? AND puuid IN ({placeholders}) GROUP BY tier",
         (platform, *puuids),
-    ).fetchone()[0]
+    ).fetchall())
+    n_diamond_plus = sum(counts.get(t, 0) for t in LADDERS["diamond_plus"])
+    return n_diamond_plus, counts.get("EMERALD", 0) if LADDER == "emerald" else None
 
 
 def store_match(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
-    row = dict(row, n_diamond_plus=count_diamond_plus(conn, row["platform"], json.loads(row["puuids"])))
+    n_diamond_plus, n_emerald = count_tiers(conn, row["platform"], json.loads(row["puuids"]))
+    row = dict(row, n_diamond_plus=n_diamond_plus, n_emerald=n_emerald, crawled_from=LADDER)
     cols = ", ".join(row)
     conn.execute(f"INSERT OR IGNORE INTO matches ({cols}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
     conn.commit()
@@ -487,8 +524,8 @@ def cmd_collect(args: argparse.Namespace) -> None:
 
     regions = {r: p for r, p in REGIONS.items() if not args.regions or r in args.regions}
     log.info(
-        "Collecting Diamond+ ranked solo/duo since %s UTC for %s",
-        datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%d"),
+        "Collecting %s ranked solo/duo into %s since %s UTC for %s",
+        LADDER_LABELS[LADDER], DB_PATH, datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%d"),
         ", ".join(f"{r} ({'/'.join(p)})" for r, p in regions.items()),
     )
 
@@ -538,8 +575,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     since = get_meta(conn, "since")
     if since:
         print(f"Collecting since: {datetime.fromtimestamp(int(since), timezone.utc):%Y-%m-%d} UTC")
+    print("\nMatches by ladder crawled:")
+    print(q("SELECT crawled_from, COUNT(*) AS matches FROM matches GROUP BY crawled_from").to_string(index=False))
     print("\nMatches by platform:")
-    print(q("SELECT region, platform, COUNT(*) AS matches, ROUND(AVG(n_diamond_plus), 2) AS avg_diamond_plus "
+    print(q("SELECT region, platform, COUNT(*) AS matches, ROUND(AVG(n_diamond_plus), 2) AS avg_diamond_plus, "
+            "ROUND(AVG(n_emerald), 2) AS avg_emerald "
             "FROM matches GROUP BY region, platform ORDER BY region, matches DESC").to_string(index=False))
     print("\nMatches by patch:")
     print(q("SELECT patch, COUNT(*) AS matches, MIN(datetime(game_creation, 'unixepoch')) AS first_game, "
@@ -565,22 +605,78 @@ def cmd_export(args: argparse.Namespace) -> None:
     df = pd.read_sql_query(
         f"""
         SELECT match_id, platform AS source_platform, region AS source_region, patch, game_version,
-               game_creation, game_duration, n_diamond_plus,
+               game_creation, game_duration, n_diamond_plus, n_emerald, crawled_from,
                {", ".join(f"blue_{r}" for r in ROLES)}, {", ".join(f"red_{r}" for r in ROLES)}, blue_win
         FROM matches
-        WHERE n_diamond_plus >= ?
+        WHERE n_diamond_plus >= ? AND n_diamond_plus + COALESCE(n_emerald, 0) >= ?
         ORDER BY game_creation
         """,
         conn,
-        params=(args.min_diamond,),
+        params=(args.min_diamond, args.min_emerald_plus),
     )
-    out = Path(args.out) if args.out else EXPORT_DIR / f"drafts_diamond{args.min_diamond}plus_{len(df)}.csv"
+    if args.out:
+        out = Path(args.out)
+    elif args.min_emerald_plus:
+        out = EXPORT_DIR / f"drafts_emerald{args.min_emerald_plus}plus_{len(df)}.csv"
+    else:
+        out = EXPORT_DIR / f"drafts_diamond{args.min_diamond}plus_{len(df)}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
-    print(f"Exported {len(df)} matches (n_diamond_plus >= {args.min_diamond}) to {out}")
+    print(f"Exported {len(df)} matches (n_diamond_plus >= {args.min_diamond}, "
+          f"Emerald or higher >= {args.min_emerald_plus}) to {out}")
 
 
-def main() -> None:
+def cmd_pack(args: argparse.Namespace) -> None:
+    """Copy games collected since the last pack into a small file to send to the main collector."""
+    conn = connect()
+    init_db(conn)
+    out = Path(args.out) if args.out else EXPORT_DIR / f"pack_{LADDER}_{datetime.now():%Y%m%d_%H%M}.sqlite"
+    if out.exists():
+        raise SystemExit(f"{out} already exists")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # rowids only grow (rows are never deleted), so they mark what was already packed
+    tables = ("matches", "skipped")
+    after = {t: 0 if args.all else int(get_meta(conn, f"packed_rowid:{t}") or 0) for t in tables}
+    upto = {t: conn.execute(f"SELECT COALESCE(MAX(rowid), 0) FROM {t}").fetchone()[0] for t in tables}
+    if all(upto[t] <= after[t] for t in tables):
+        print("No new games since the last pack.")
+        return
+    conn.execute("ATTACH DATABASE ? AS pack", (str(out),))
+    for t in tables:
+        conn.execute(f"CREATE TABLE pack.{t} AS SELECT * FROM main.{t} WHERE rowid > ? AND rowid <= ?", (after[t], upto[t]))
+    conn.commit()
+    n = conn.execute("SELECT COUNT(*) FROM pack.matches").fetchone()[0]
+    conn.execute("DETACH DATABASE pack")
+    for t in tables:
+        set_meta(conn, f"packed_rowid:{t}", str(upto[t]))
+    print(f"Packed {n} games into {out.resolve()}\nSend this file to whoever runs the main collector.")
+
+
+def cmd_merge(args: argparse.Namespace) -> None:
+    """Add games from a pack (or a whole collector database) made on another machine."""
+    path = Path(args.path)
+    if not path.exists():
+        raise SystemExit(f"{path} not found")
+    conn = connect()
+    init_db(conn)
+    conn.execute("ATTACH DATABASE ? AS other", (str(path),))
+    cols = [r[1] for r in conn.execute("PRAGMA main.table_info(matches)")]
+    missing = set(cols) - {r[1] for r in conn.execute("PRAGMA other.table_info(matches)")}
+    if missing:
+        raise SystemExit(f"{path} is missing columns {sorted(missing)}; it was made by an older version of the collector (git pull, then pack again)")
+
+    col_list = ", ".join(cols)
+    before = conn.execute("SELECT COUNT(*) FROM main.matches").fetchone()[0]
+    conn.execute(f"INSERT OR IGNORE INTO main.matches ({col_list}) SELECT {col_list} FROM other.matches")
+    conn.execute("INSERT OR IGNORE INTO main.skipped (match_id, reason) SELECT match_id, reason FROM other.skipped")
+    conn.commit()
+    added = conn.execute("SELECT COUNT(*) FROM main.matches").fetchone()[0] - before
+    offered = conn.execute("SELECT COUNT(*) FROM other.matches").fetchone()[0]
+    print(f"Added {added} of {offered} games from {path} ({offered - added} were already here)")
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -595,10 +691,22 @@ def main() -> None:
 
     p = sub.add_parser("export", help="write a CSV for scripts.train_draft_baseline")
     p.add_argument("--min-diamond", type=int, default=0, help="keep matches with at least this many Diamond+ players (0-10)")
+    p.add_argument("--min-emerald-plus", type=int, default=0,
+                   help="keep matches with at least this many Emerald-or-higher players (0-10); games crawled from "
+                        "the Diamond+ ladder have no Emerald count, so only their Diamond+ players count")
     p.add_argument("--out", help="output CSV path")
     p.set_defaults(func=cmd_export)
 
-    args = parser.parse_args()
+    p = sub.add_parser("pack", help="write games collected since the last pack to a file for `merge`")
+    p.add_argument("--all", action="store_true", help="pack every game, not only new ones")
+    p.add_argument("--out", help="output .sqlite path")
+    p.set_defaults(func=cmd_pack)
+
+    p = sub.add_parser("merge", help="add games from a pack made by another collector")
+    p.add_argument("path", help="pack .sqlite file (or another collector database)")
+    p.set_defaults(func=cmd_merge)
+
+    args = parser.parse_args(argv)
     args.func(args)
 
 

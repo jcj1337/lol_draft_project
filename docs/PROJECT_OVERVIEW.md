@@ -110,6 +110,23 @@ Because the tool **ranks options**, what matters most is the *difference* betwee
 
 `--min-diamond 8` keeps only games where at least 8 of the 10 players are Diamond+ (some Diamond players' games are in lower-ranked lobbies).
 
+### 4.3 Second collector: Emerald games (`scripts/collect_emerald.py`)
+
+A second person with their own API key can collect Emerald games on their own computer, which roughly doubles how many games come in per day. It is the same collector with one setting changed:
+
+- It crawls **Emerald** players instead of Diamond+ ones. It downloads the Emerald ladder *and* the Diamond+ ladder, so each game records both `n_emerald` and `n_diamond_plus`, and every game is tagged with `crawled_from` (`emerald` or `diamond_plus`).
+- It keeps its own database, `data/collector/drafts_emerald.sqlite`. Setup steps are at the top of the script.
+- Every day or two the Emerald collector runs `pack`, which writes the games collected since the last pack to a small file, and sends it over. The main collector adds them with `merge`; games that both collectors found are kept once, and `merge` reports how many there were.
+
+```
+.venv\Scripts\python -m scripts.collect_emerald                  # (second computer) collect until Ctrl+C
+.venv\Scripts\python -m scripts.collect_emerald pack             # (second computer) file of new games
+.venv\Scripts\python -m scripts.collect_drafts merge <pack file> # (main computer) add them
+.venv\Scripts\python -m scripts.collect_drafts export --min-emerald-plus 8   # games with 8+ Emerald-or-higher players
+```
+
+Games found through the Diamond+ collector have no Emerald count (`n_emerald` is empty), so for them `--min-emerald-plus` counts only Diamond+ players. Because each game keeps its rank mix, a model trained on Emerald games can be compared with one trained on Diamond+ games to check how much rank matters.
+
 ---
 
 ## 5. How models are tested
@@ -326,7 +343,8 @@ Without `--csv`, scripts use the original 110k-game dataset.
 
 | Path | What it is |
 |---|---|
-| `scripts/collect_drafts.py` | New data collector (roster, crawling, SQLite, export, status). |
+| `scripts/collect_drafts.py` | New data collector (roster, crawling, SQLite, export, status, pack/merge). |
+| `scripts/collect_emerald.py` | Runs the collector on Emerald players, for a second computer and key (§4.3). |
 | `src/riot_client.py` | Riot API client: rate limiting per region and per endpoint, key-expiry pause. |
 | `src/draft_features.py` | Loading raw drafts, time-based split, symmetric features for linear models. |
 | `src/draft_models.py` | All current models (§6). |
