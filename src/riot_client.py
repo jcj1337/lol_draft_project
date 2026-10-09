@@ -273,9 +273,16 @@ class RiotClient:
                 if key_ok is None:
                     failures += 1
                     continue
-                if key_ok:
+                if not key_ok:
+                    self.keys.reject(key)
+                    continue
+                if r.status_code == 403:
                     r.raise_for_status()
-                self.keys.reject(key)
+                # 401 is never about the request itself: a key the status check accepts can still be
+                # activating on this routing value, so back off and retry instead of failing the request
+                failures += 1
+                log.debug("401 on %s with a working key, retrying", url)
+                self.stop.wait(min(2 ** failures, 60))
                 continue
 
             if r.status_code == 429:
