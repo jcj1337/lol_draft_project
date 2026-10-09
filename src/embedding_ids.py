@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from cProfile import label
-from cProfile import label
 from pathlib import Path
 from typing import Dict, List
 
@@ -111,8 +109,6 @@ NUMERIC_FEATURE_COLS = [
     "team_b_jg_is_enchanter",
 ]
 ALL_CHAMP_COLS = TEAM_A_COLS + TEAM_B_COLS
-LABEL_COL = "team_a_win"
-ROLE_IDS = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4]
 
 def load_cleaned_csv(csv_path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -187,37 +183,3 @@ class DraftDataset(Dataset):
             "numeric_features": numeric_features,
             "label": label,
         }
-
-
-class DraftEmbeddingInput(nn.Module):
-    """
-    Turns champion ids into trainable embedding vectors
-
-    Output shape:
-        [batch_size, 10, embed_dim]
-    """
-
-    def __init__(self, num_champions: int, embed_dim: int):
-        super().__init__()
-        self.champion_embedding = nn.Embedding(num_embeddings=num_champions, embedding_dim=embed_dim)
-        self.team_embedding = nn.Embedding(num_embeddings=2, embedding_dim=embed_dim)
-
-    def forward(
-        self,
-        numeric_features: torch.Tensor,
-        champ_ids: torch.Tensor,
-        team_ids: torch.Tensor,
-        role_ids: torch.Tensor,
-        subclass_ids: torch.Tensor,
-        scaling_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        champ_ids: [B, 10]
-        team_ids:  [B, 10]
-        """
-        champ_emb = self.champion_embedding(champ_ids)  # [B, 10, D]
-        team_emb = self.team_embedding(team_ids)        # [B, 10, D]
-
-        # Combine champion identity + which team they belong to (to model synergies + counters)
-        x = champ_emb + team_emb
-        return x

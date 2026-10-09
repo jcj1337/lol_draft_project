@@ -1,0 +1,23 @@
+{
+  "constant": {},
+  "champ": {
+    "C": 0.01,
+    "pair_scale": 1.0,
+    "n_features_train": 172
+  },
+  "champ_role": {
+    "C": 0.01,
+    "pair_scale": 1.0,
+    "n_features_train": 804
+  },
+  "champ_role+matchup": {
+    "C": 0.01,
+    "pair_scale": 0.5,
+    "n_features_train": 8310
+  },
+  "champ_role+matchup+synergy": {
+    "C": 0.01,
+    "pair_scale": 0.5,
+    "n_features_train": 17924
+  }
+}
