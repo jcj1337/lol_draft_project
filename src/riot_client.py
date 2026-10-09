@@ -5,6 +5,8 @@ Riot API client for long-running collection with a development key.
   so we stay under the app limits instead of bouncing off 429s.
 - ApiKeyManager: when the key expires (401/403), all requests pause and .env is re-read
   every few seconds; pasting a new key into .env resumes collection without a restart.
+  A fresh key can take a moment to become active, so one Riot rejects is retried every
+  minute until it works.
 - RiotClient: GET with retries, shared by all collector threads.
 """
 from __future__ import annotations
@@ -25,12 +27,28 @@ log = logging.getLogger("collector")
 DEFAULT_APP_LIMITS = [(20, 1.0), (100, 120.0)]
 
 KEY_POLL_SECONDS = 30
+KEY_RETRY_SECONDS = 60  # how often a key Riot does not accept yet is tried again
 KEY_REMINDER_SECONDS = 600
 KEY_PROBE_ROUTING = "na1"  # any platform works; used to tell an expired key from a forbidden request
 
 
 class CollectionStopped(Exception):
     """Raised inside worker threads once a shutdown was requested."""
+
+
+def key_works(key: str, session: requests.Session | None = None) -> bool | None:
+    """True/False if a cheap status call accepts/rejects `key`; None if the check itself failed."""
+    try:
+        r = (session or requests).get(
+            f"https://{KEY_PROBE_ROUTING}.api.riotgames.com/lol/status/v4/platform-data",
+            headers={"X-Riot-Token": key},
+            timeout=30,
+        )
+    except requests.RequestException:
+        return None
+    if r.status_code in (401, 403):
+        return False
+    return True if r.status_code < 500 else None
 
 
 def parse_limit_header(value: str) -> list[tuple[int, float]]:
@@ -92,18 +110,28 @@ class RateLimiter:
 
 
 class ApiKeyManager:
+    """
+    Every key is checked with a cheap status call before use. A key Riot does not accept yet
+    (fresh keys take a moment to activate) is retried every KEY_RETRY_SECONDS until it works
+    or .env changes. A key that worked and was later rejected has expired and is not retried.
+    """
+
     def __init__(self, env_path: Path, stop: threading.Event):
         self.env_path = env_path
         self._stop = stop
         self._lock = threading.Lock()
         self._valid = threading.Event()
-        self._rejected_key: str | None = None
-        self._paused_at = 0.0
+        self._key = ""
+        self._verified = False  # Riot accepted self._key at least once
+        self._expired_key: str | None = None
+        self._tried_key: str | None = None  # last key Riot did not accept, and when
+        self._tried_at = 0.0
+        self._paused_at = time.time()
 
-        self._key = self._read_key()
-        if not self._key:
+        key = self._read_key()
+        if not key:
             raise RuntimeError(f"No RIOT_API_KEY found in {env_path.resolve()}")
-        self._valid.set()
+        self._try_key(key)
 
         threading.Thread(target=self._watch, name="key-watcher", daemon=True).start()
 
@@ -132,7 +160,8 @@ class ApiKeyManager:
             if key != self._key or not self._valid.is_set():
                 return  # another thread already reported it, or the key was replaced
             self._valid.clear()
-            self._rejected_key = key
+            if self._verified:
+                self._expired_key = key
             self._paused_at = time.time()
         log.warning(
             "API key rejected (expired?). Collection is PAUSED. "
@@ -140,21 +169,36 @@ class ApiKeyManager:
             self.env_path.resolve(),
         )
 
+    def _try_key(self, key: str) -> bool:
+        """Start using `key` unless Riot rejects it. A failed check gives the key the benefit of the doubt."""
+        ok = key_works(key)
+        if ok is False:
+            if key != self._tried_key:
+                log.warning("Riot does not accept the key in .env yet. Retrying every %ds until it works.", KEY_RETRY_SECONDS)
+            self._tried_key, self._tried_at = key, time.time()
+            return False
+        with self._lock:
+            self._key = key
+            self._verified = ok is True
+            self._valid.set()
+        return True
+
     def _watch(self) -> None:
         last_reminder = time.time()
         while not self._stop.wait(KEY_POLL_SECONDS):
             if self._valid.is_set():
                 continue
-            new_key = self._read_key()
-            if new_key and new_key != self._rejected_key:
-                with self._lock:
-                    self._key = new_key
-                    self._valid.set()
+            key = self._read_key()
+            retry_due = key != self._tried_key or time.time() - self._tried_at >= KEY_RETRY_SECONDS
+            if key and key != self._expired_key and retry_due and self._try_key(key):
                 paused_for = time.time() - self._paused_at
-                log.warning("New API key found in .env after %.0f min paused. Resuming.", paused_for / 60)
+                log.warning("API key accepted after %.0f min paused. Resuming.", paused_for / 60)
             elif time.time() - last_reminder >= KEY_REMINDER_SECONDS:
                 last_reminder = time.time()
-                log.warning("Still paused: waiting for a new RIOT_API_KEY in %s", self.env_path.resolve())
+                if key and key == self._tried_key:
+                    log.warning("Still paused: Riot has not accepted the key in .env yet, retrying every %ds", KEY_RETRY_SECONDS)
+                else:
+                    log.warning("Still paused: waiting for a new RIOT_API_KEY in %s", self.env_path.resolve())
 
 
 class RiotClient:
@@ -178,19 +222,8 @@ class RiotClient:
             return self._limiters[routing]
 
     def _key_works(self, key: str) -> bool | None:
-        """True/False if a cheap status call accepts/rejects `key`; None if the check itself failed."""
         self.limiter(KEY_PROBE_ROUTING).acquire(self.stop)
-        try:
-            r = self._session().get(
-                f"https://{KEY_PROBE_ROUTING}.api.riotgames.com/lol/status/v4/platform-data",
-                headers={"X-Riot-Token": key},
-                timeout=30,
-            )
-        except requests.RequestException:
-            return None
-        if r.status_code in (401, 403):
-            return False
-        return True if r.status_code < 500 else None
+        return key_works(key, self._session())
 
     def method_limiter(self, routing: str, method: str) -> RateLimiter:
         """Per-endpoint limiter; starts unlimited and learns its limits from X-Method-Rate-Limit."""
