@@ -18,7 +18,7 @@ has its own database, so the Emerald collector never touches the Diamond+ one.
 Run from the project root:
     python -m scripts.collect_drafts collect [--since YYYY-MM-DD]
     python -m scripts.collect_drafts status
-    python -m scripts.collect_drafts export [--min-diamond 8 | --min-emerald-plus 8] [--out path.csv]
+    python -m scripts.collect_drafts export [--out path.csv]   # every game; optional --min-diamond / --min-emerald-plus
     python -m scripts.collect_drafts merge path/to/pack.sqlite   # add games from the Emerald collector
 """
 from __future__ import annotations
@@ -48,6 +48,9 @@ DATA_DIR = Path("data/collector")
 DB_PATH = DATA_DIR / "drafts.sqlite"
 LOG_PATH = DATA_DIR / "collector.log"
 EXPORT_DIR = DATA_DIR / "exports"
+# games shorter than this ended early (a leaver, early surrender) and say little about the draft;
+# they stay in the database but are left out of exports
+MIN_EXPORT_DURATION_SECONDS = 15 * 60
 ENV_PATH = Path(".env")
 
 QUEUE = "RANKED_SOLO_5x5"
@@ -608,22 +611,24 @@ def cmd_export(args: argparse.Namespace) -> None:
                game_creation, game_duration, n_diamond_plus, n_emerald, crawled_from,
                {", ".join(f"blue_{r}" for r in ROLES)}, {", ".join(f"red_{r}" for r in ROLES)}, blue_win
         FROM matches
-        WHERE n_diamond_plus >= ? AND n_diamond_plus + COALESCE(n_emerald, 0) >= ?
+        WHERE n_diamond_plus >= ? AND n_diamond_plus + COALESCE(n_emerald, 0) >= ? AND game_duration >= ?
         ORDER BY game_creation
         """,
         conn,
-        params=(args.min_diamond, args.min_emerald_plus),
+        params=(args.min_diamond, args.min_emerald_plus, MIN_EXPORT_DURATION_SECONDS),
     )
     if args.out:
         out = Path(args.out)
     elif args.min_emerald_plus:
         out = EXPORT_DIR / f"drafts_emerald{args.min_emerald_plus}plus_{len(df)}.csv"
-    else:
+    elif args.min_diamond:
         out = EXPORT_DIR / f"drafts_diamond{args.min_diamond}plus_{len(df)}.csv"
+    else:
+        out = EXPORT_DIR / f"drafts_all_{len(df)}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     print(f"Exported {len(df)} matches (n_diamond_plus >= {args.min_diamond}, "
-          f"Emerald or higher >= {args.min_emerald_plus}) to {out}")
+          f"Emerald or higher >= {args.min_emerald_plus}, at least {MIN_EXPORT_DURATION_SECONDS // 60} min long) to {out}")
 
 
 def cmd_pack(args: argparse.Namespace) -> None:
@@ -690,7 +695,7 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("export", help="write a CSV for scripts.train_draft_baseline")
-    p.add_argument("--min-diamond", type=int, default=0, help="keep matches with at least this many Diamond+ players (0-10)")
+    p.add_argument("--min-diamond", type=int, default=0, help="keep matches with at least this many Diamond+ players (0-10); default keeps every game")
     p.add_argument("--min-emerald-plus", type=int, default=0,
                    help="keep matches with at least this many Emerald-or-higher players (0-10); games crawled from "
                         "the Diamond+ ladder have no Emerald count, so only their Diamond+ players count")

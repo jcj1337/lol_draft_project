@@ -91,7 +91,7 @@ Because the tool **ranks options**, what matters most is the *difference* betwee
 - **Which servers.** AMERICAS: NA1, BR1, LA1, LA2. EUROPE: EUW1, EUN1, TR1. ASIA: KR, JP1. SEA: OC1, SG2, TW2, VN2. Servers in the same region share its rate limit, so extra servers add *supply* (more Diamond+ games), not speed.
 - **Crawl order.** Players with the most games this season are crawled first; players whose last check found no new games are re-checked every 48 hours instead of every 6.
 - **Resumable.** Every game is written to `data/collector/drafts.sqlite` as soon as it arrives. Stopping (Ctrl+C) and restarting loses nothing.
-- **Key expiry.** Development keys expire every 24 hours. When that happens, the collector **pauses** and checks `.env` every 30 seconds; paste in a new key and it resumes by itself.
+- **Key expiry.** Development keys expire every 24 hours. When that happens, the collector **pauses** and checks `.env` every 30 seconds; paste in a new key and it resumes by itself. A fresh key can take a moment to activate, so if Riot rejects it at first, the collector tries it again every minute until it works.
 
 **What is stored per game:** match ID, server, region, start time, exact game version and patch, duration, the 10 champions (names and IDs) by side and role, which side won, both teams' bans, the 10 player IDs (for future player features), and `n_diamond_plus`, the number of the 10 players who are on our Diamond+ roster. Remakes and games with broken role data are skipped and recorded in a `skipped` table.
 
@@ -105,10 +105,10 @@ Because the tool **ranks options**, what matters most is the *difference* betwee
 ```
 .venv\Scripts\python -m scripts.collect_drafts collect            # run until Ctrl+C
 .venv\Scripts\python -m scripts.collect_drafts status             # what has been collected
-.venv\Scripts\python -m scripts.collect_drafts export --min-diamond 8   # CSV for the models
+.venv\Scripts\python -m scripts.collect_drafts export          # CSV for the models
 ```
 
-`--min-diamond 8` keeps only games where at least 8 of the 10 players are Diamond+ (some Diamond players' games are in lower-ranked lobbies).
+The export keeps every collected game, including the mixed lobbies that some Diamond players' games are in (`--min-diamond N` can still restrict it to games with at least N Diamond+ players). Games shorter than 15 minutes are always left out: they ended early because of a leaver or an early surrender and say little about the draft. They stay in the database.
 
 ### 4.3 Second collector: Emerald games (`scripts/collect_emerald.py`)
 
@@ -332,7 +332,7 @@ py -3.13 -m venv .venv
 |---|---|
 | Collect data | `.venv\Scripts\python -m scripts.collect_drafts collect` |
 | See collection progress | `.venv\Scripts\python -m scripts.collect_drafts status` |
-| Export a CSV | `.venv\Scripts\python -m scripts.collect_drafts export --min-diamond 8` |
+| Export a CSV | `.venv\Scripts\python -m scripts.collect_drafts export` |
 | Logistic regression baseline + example rankings | `.venv\Scripts\python -m scripts.train_draft_baseline --csv <csv> --out <dir>` |
 | Compare all models, learning curves, recency | `.venv\Scripts\python -m scripts.compare_models --csv <csv> --out <dir>` (add `--no-transformer` to save time) |
 | Train / use the recommender | `.venv\Scripts\python -m scripts.recommend fit ...` / `rank ...` |
@@ -395,7 +395,7 @@ This section lists what the current model does **not** do or does poorly, groupe
 ## 11. Suggested next steps
 
 1. **Collect.** Keep the collector running for a few days, renewing the key daily. `collect_drafts status` shows progress and when the current patches are exhausted.
-2. **Re-run the comparison on the new data**, e.g. at ~250k and ~1M games: `collect_drafts export --min-diamond 8`, then `compare_models --csv <export> --no-transformer` and `train_draft_baseline --csv <export>`. The question to answer: do the interaction models finally beat the tier list?
+2. **Re-run the comparison on the new data**, e.g. at ~250k and ~1M games: `collect_drafts export`, then `compare_models --csv <export> --no-transformer` and `train_draft_baseline --csv <export>`. The question to answer: do the interaction models finally beat the tier list?
 3. **Refit the recommender** on the new export (`recommend.py fit --csv <export> --gamma 0.7`) and sanity-check its rankings with someone who follows the current meta.
 4. **Player experience on each champion (gaps 1 and 7).** The collector already stores player IDs. For each game, count how often each player played their champion *before* that game (never after, to avoid another leak) and add it as a feature. This is likely the single biggest improvement, both for accuracy and for the one-trick problem.
 5. **Partial drafts (gap 8).** Train with randomly hidden picks so the model learns what an unknown pick is worth in each position, instead of assuming an average champion.
