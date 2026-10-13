@@ -64,6 +64,9 @@ REGIONS: dict[str, list[str]] = {
     "ASIA": ["KR", "JP1"],
     "SEA": ["OC1", "SG2", "TW2", "VN2"],
 }
+# platforms whose due players are always crawled before the rest of their region's; the
+# others only get the region's rate limit once these are caught up
+PRIORITY_PLATFORMS = ["NA1"]
 DIVISIONS = ["I", "II", "III", "IV"]
 APEX_TIERS = {
     "MASTER": "masterleagues",
@@ -353,12 +356,15 @@ def next_players(conn: sqlite3.Connection, platforms: list[str]) -> list[tuple[s
           AND r.seen_at >= ?
           AND (p.last_attempt IS NULL
                OR p.last_attempt < CASE WHEN COALESCE(p.found, 1) > 0 THEN ? ELSE ? END)
-        -- never-crawled players first, most season games first; then the longest-waiting
-        ORDER BY p.last_attempt IS NOT NULL, COALESCE(r.games, 0) DESC, p.last_attempt
+        -- priority platforms first; then never-crawled players, most season games first;
+        -- then the longest-waiting
+        ORDER BY r.platform NOT IN ({",".join("?" * len(PRIORITY_PLATFORMS))}),
+                 p.last_attempt IS NOT NULL, COALESCE(r.games, 0) DESC, p.last_attempt
         LIMIT ?
         """,
         (*platforms, *tiers, now - ROSTER_CURRENT_HOURS * 3600,
-         now - MIN_RECRAWL_HOURS * 3600, now - INACTIVE_RECRAWL_HOURS * 3600, PLAYER_BATCH),
+         now - MIN_RECRAWL_HOURS * 3600, now - INACTIVE_RECRAWL_HOURS * 3600,
+         *PRIORITY_PLATFORMS, PLAYER_BATCH),
     ).fetchall()
 
 

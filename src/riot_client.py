@@ -12,6 +12,7 @@ Riot API client for long-running collection with a development key.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from collections import deque
@@ -49,6 +50,29 @@ def key_works(key: str, session: requests.Session | None = None) -> bool | None:
     if r.status_code in (401, 403):
         return False
     return True if r.status_code < 500 else None
+
+
+def set_terminal_title(title: str) -> None:
+    """Rename the terminal window/tab, so the state shows in the taskbar too."""
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleTitleW(title)
+    else:
+        sys.stderr.write(f"\033]0;{title}\007")
+        sys.stderr.flush()
+
+
+def terminal_alert(lines: list[str]) -> None:
+    """Beep and print a red banner that stands out from the log lines."""
+    if sys.platform == "win32":
+        import os
+
+        os.system("")  # turns on ANSI colours in the classic Windows console
+    bar = "!" * 78
+    body = "\n".join(f"  {line}" for line in lines)
+    sys.stderr.write(f"\a\n\033[1;97;41m{bar}\033[0m\n\033[1;91m{body}\033[0m\n\033[1;97;41m{bar}\033[0m\n\n")
+    sys.stderr.flush()
 
 
 def parse_limit_header(value: str) -> list[tuple[int, float]]:
@@ -131,7 +155,8 @@ class ApiKeyManager:
         key = self._read_key()
         if not key:
             raise RuntimeError(f"No RIOT_API_KEY found in {env_path.resolve()}")
-        self._try_key(key)
+        if self._try_key(key):
+            set_terminal_title("Draft collector - running")
 
         threading.Thread(target=self._watch, name="key-watcher", daemon=True).start()
 
@@ -168,6 +193,17 @@ class ApiKeyManager:
             "Paste a new key into %s as RIOT_API_KEY=... and it will resume automatically.",
             self.env_path.resolve(),
         )
+        self._alert_paused()
+
+    def _alert_paused(self) -> None:
+        paused_min = (time.time() - self._paused_at) / 60
+        set_terminal_title(f"KEY EXPIRED - collector paused {paused_min:.0f} min")
+        terminal_alert([
+            f"RIOT API KEY EXPIRED - collection PAUSED since {time.strftime('%H:%M', time.localtime(self._paused_at))} "
+            f"({paused_min:.0f} min)",
+            f"Paste a new key into {self.env_path.resolve()} as RIOT_API_KEY=RGAPI-...",
+            "The collector resumes by itself, no restart needed.",
+        ])
 
     def _try_key(self, key: str) -> bool:
         """Start using `key` unless Riot rejects it. A failed check gives the key the benefit of the doubt."""
@@ -193,12 +229,14 @@ class ApiKeyManager:
             if key and key != self._expired_key and retry_due and self._try_key(key):
                 paused_for = time.time() - self._paused_at
                 log.warning("API key accepted after %.0f min paused. Resuming.", paused_for / 60)
+                set_terminal_title("Draft collector - running")
             elif time.time() - last_reminder >= KEY_REMINDER_SECONDS:
                 last_reminder = time.time()
                 if key and key == self._tried_key:
                     log.warning("Still paused: Riot has not accepted the key in .env yet, retrying every %ds", KEY_RETRY_SECONDS)
                 else:
                     log.warning("Still paused: waiting for a new RIOT_API_KEY in %s", self.env_path.resolve())
+                    self._alert_paused()
 
 
 class RiotClient:
