@@ -4,6 +4,8 @@
 
 "/reports" contains the project proposal and progress reports. lol_draft_project_docs goes more in-depth on why certain things were done along with dated progress (there is more passion here)
 
+Currently undergoing a revamp to turn into more of an actual tool 
+
 ## Project Notes (as of 4/20/2026)
 Cool stuff unique to my project worth discussing:
 
