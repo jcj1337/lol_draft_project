@@ -1,6 +1,6 @@
 """
 Draft-only baseline: L2 logistic regressions on champion / matchup / synergy features,
-evaluated on a time-based split (test = latest patch).
+evaluated on a random split inside each patch (test = 15% of every patch).
 
 Run from the project root:
     python -m scripts.train_draft_baseline
@@ -24,7 +24,7 @@ from src.draft_features import (
     DraftFeaturizer,
     load_raw_drafts,
     row_teams,
-    time_split,
+    within_patch_split,
 )
 
 # -----------------------------
@@ -272,7 +272,7 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     df = load_raw_drafts(RAW_CSV)
-    train_df, val_df, test_df = time_split(df)
+    train_df, val_df, test_df = within_patch_split(df, seed=SEED)
     trainval_df = pd.concat([train_df, val_df], ignore_index=True)
 
     print(f"Loaded {len(df)} games from {RAW_CSV}")

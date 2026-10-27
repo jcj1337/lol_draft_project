@@ -68,29 +68,24 @@ def load_raw_drafts(csv_path: str | Path, min_major_patch: int = 16) -> pd.DataF
     return df
 
 
-def time_split(
+def within_patch_split(
     df: pd.DataFrame,
-    val_frac_of_second_latest: float = 0.4,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
+    seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    test  = the latest patch
-    val   = the latest `val_frac_of_second_latest` of the second-latest patch, per platform
-    train = everything earlier
+    test  = a random `test_frac` of each patch's games
+    val   = a random `val_frac` of each patch's games
+    train = the rest
+    The live recommender is retrained on the newest games, so it usually has games from the
+    current patch. Testing on an unseen patch would add a handicap unrelated to draft modelling,
+    and inside one patch a random draw showed no measurable difference from a date cut.
     """
-    patch_order = df[["patch_major", "patch_minor"]].drop_duplicates().sort_values(["patch_major", "patch_minor"])
-    patches = [f"{a}.{b}" for a, b in patch_order.itertuples(index=False)]
-    if len(patches) < 2:
-        raise ValueError("Need at least two patches for a time-based split.")
-    test_patch, val_patch = patches[-1], patches[-2]
-
-    test_mask = df["patch"] == test_patch
-    in_val_patch = df["patch"] == val_patch
-
-    # rank games within each platform by time, newest last
-    pct = df[in_val_patch].groupby("source_platform")["time_order"].rank(pct=True)
-    val_mask = pd.Series(False, index=df.index)
-    val_mask.loc[pct.index] = pct > (1.0 - val_frac_of_second_latest)
-
+    u = pd.Series(np.random.default_rng(seed).random(len(df)), index=df.index)
+    pct = u.groupby(df["patch"]).rank(pct=True)
+    test_mask = pct <= test_frac
+    val_mask = (pct > test_frac) & (pct <= test_frac + val_frac)
     train_mask = ~test_mask & ~val_mask
     return (
         df[train_mask].reset_index(drop=True),

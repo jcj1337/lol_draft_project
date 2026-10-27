@@ -1,6 +1,6 @@
 # LoL Draft Win Probability: Project Overview
 
-*Last updated: 2026-10-08. Branch: `data-collector`.*
+*Last updated: 2026-10-27. Branch: `data-collector`.*
 
 This document explains the whole project from scratch: what it is for, where the data comes from, how each model works, what we have learned so far, and what is still missing. You do not need to know League of Legends or machine learning to follow it; the technical details are there for those who want them.
 
@@ -58,6 +58,7 @@ Because the tool **ranks options**, what matters most is the *difference* betwee
 3. **Draft-only restart.** We dropped all player features and asked the honest question: how much can the *draft alone* tell us? Answer: a small but real amount, about **53.5% accuracy / AUC 0.55**. That is normal for solo-queue games, where player skill and in-game play dominate.
 4. **The tool depends on that small signal.** When ranking which champion *you* should pick, everything about the players stays the same between candidates, so only the draft part of the model can tell candidates apart.
 5. **New data pipeline.** The old dataset is 110k games from patches 16.1-16.6 (early 2026), which is too few games to learn matchups and too old for today's balance. A new collector (§4.2) downloads draft data continuously.
+6. **New test split.** Tests now hold out random games inside every patch instead of the whole newest patch, because the live tool is retrained on games from the current patch (§5). The results in §7 still come from the old split.
 
 ---
 
@@ -131,14 +132,24 @@ Games found through the Diamond+ collector have no Emerald count (`n_emerald` is
 
 ## 5. How models are tested
 
-- **Time-based split.** A tool predicts *future* games, so we test that way:
-  - **test** = all games from the most recent patch;
-  - **validation** (used to pick settings) = the newest 40% of games from the patch before;
-  - **training** = everything older.
-
-  Settings are chosen on validation; the model is then retrained on training + validation and scored once on test.
+- **Random split inside each patch** (`within_patch_split` in `src/draft_features.py`). Each patch gives a random 15% of its games to **test** and another 15% to **validation**, which is used to pick settings. The remaining 70% is **training**. Settings are chosen on validation. The model is then retrained on training + validation and scored once on test.
 - **Main number:** test log-loss improvement over the constant model, with a bootstrap 95% confidence interval.
 - **Symmetry.** Every model satisfies: *swapping the two teams turns P(blue wins) into 1 − P(blue wins)*, except for one learned number for the blue-side advantage. Each game therefore teaches the model about both teams' compositions equally.
+
+### Why the split is inside each patch
+
+The tool is retrained on the newest games. The collector stores more than 100k games a day (§4.2), so one day after a patch is released, the tool already has a large sample of games from it. The question that matters is therefore how well a model predicts games on a patch it has already seen games from. With this split, every test game has games from its own patch in training, which matches that situation.
+
+Before 2026-10-27, the test set was the whole newest patch, and the model trained only on earlier patches. That added a handicap: predicting across a balance change. The handicap hits every model and says little about how well a model learns drafts. Its size depends on the patch. A one-off check on 2026-10-27 (strength model, 3 random seeds) measured it twice:
+
+| Patch change | Cost of having no games from the test patch in training (improvement × 1000) |
+|---|---|
+| 16.5 to 16.6 | about 0.9, roughly a fifth of the model's signal |
+| 16.19 to 16.20 | about 0.1, within noise |
+
+Inside a patch, the order of games makes no measurable difference. In patch 16.19, the same check tested on the last two days of the patch and trained either on earlier games only or on a random sample of the same size. Relative to training on earlier games only, the random sample scored -0.02, +0.13 and +0.41 (× 1000), and every 95% interval included zero.
+
+The split does not measure how the tool does on the first day of a new patch, before it has any games from that patch (§10, gap 12). The recency test (§7.3) still predicts each patch from earlier patches, because its question is how much older patches are worth.
 
 ---
 
@@ -215,7 +226,7 @@ Always predicts the blue side's average win rate (about 49%). Anything useful mu
 
 ### 6.7 Older models (still in the repository, not used now)
 
-These use the leaky player win-rate features (§3) and the random, non-time-based split, so their numbers are not comparable:
+These use the leaky player win-rate features (§3) and a different split, so their numbers are not comparable:
 - `src/model.py` / `scripts/train.py`: the original **DraftTransformer**. Champion + team + role + hand-labelled subclass + scaling embeddings (width 64), 3 encoder layers, `[CLS]` pooling, then the `[CLS]` vector is concatenated with 34 numeric features (player win-rate differences, games played, team composition counts) and passed through a small MLP. Reported ~63% accuracy, almost all of it from the leak.
 - `scripts/train_numeric_only.py`: an MLP on the numeric features only.
 - `scripts/train_logreg.py`, `scripts/train_XGBoost.py`: logistic regression and XGBoost on champions + numeric features.
@@ -225,6 +236,8 @@ These use the leaky player win-rate features (§3) and the random, non-time-base
 ## 7. Results
 
 All numbers below come from the original 110k-game dataset: train on patches 16.1-16.5, test on **patch 16.6 (15,092 games)**. Full outputs are in `outputs/model_comparison/` and `outputs/draft_baseline/`. The freshly collected data (§4.2) is still too small to evaluate on; see §7.5.
+
+These runs used the previous split, where the test set was the whole newest patch (§5). Their numbers are not directly comparable with runs that use the current split. The re-run on the collected data (§11) will replace them.
 
 ### 7.1 Main comparison
 
@@ -292,7 +305,7 @@ These are the model's own estimates and should be read as upper bounds (§10). T
 
 ### 7.5 Fresh data check
 
-At the time of writing, the collector had stored ~5,300 games from patches 16.19-16.20 (4,874 with ≥ 8 Diamond+ players). The full pipeline ran end to end on that export: export → time split (train/validation on 16.19, test on 16.20) → models → rankings. With only ~2,600 training games no model beats the constant model yet, which matches the learning curves (§7.2). Meaningful numbers on current-patch data need roughly 100k+ games, about half a day to a day of collection.
+At the time of writing, the collector had stored ~5,300 games from patches 16.19-16.20 (4,874 with ≥ 8 Diamond+ players). The full pipeline ran end to end on that export: export → the previous time split (train/validation on 16.19, test on 16.20) → models → rankings. With only ~2,600 training games no model beats the constant model yet, which matches the learning curves (§7.2). Meaningful numbers on current-patch data need roughly 100k+ games, about half a day to a day of collection.
 
 ---
 
@@ -346,7 +359,7 @@ Without `--csv`, scripts use the original 110k-game dataset.
 | `scripts/collect_drafts.py` | New data collector (roster, crawling, SQLite, export, status, pack/merge). |
 | `scripts/collect_emerald.py` | Runs the collector on Emerald players, for a second computer and key (§4.3). |
 | `src/riot_client.py` | Riot API client: rate limiting per region and per endpoint, key-expiry pause. |
-| `src/draft_features.py` | Loading raw drafts, time-based split, symmetric features for linear models. |
+| `src/draft_features.py` | Loading raw drafts, the within-patch train/validation/test split, symmetric features for linear models. |
 | `src/draft_models.py` | All current models (§6). |
 | `src/draft_eval.py` | Metrics and bootstrap. |
 | `scripts/train_draft_baseline.py` | Logistic-regression variants, leakage check, example rankings. |
@@ -381,7 +394,7 @@ This section lists what the current model does **not** do or does poorly, groupe
 ### Evaluation
 
 11. **Good predictions ≠ good recommendations.** We measure how well models predict outcomes of games that were played. We cannot yet measure whether *following* the recommendations wins more games; that would need an experiment or careful causal analysis.
-12. **Small, single-patch test sets.** Each test set is one patch (15k games in the old data). Differences below ~0.0005 log loss cannot be distinguished from noise, and results on one patch may not generalise.
+12. **No patch-day number.** Training always includes games from the test games' own patch (§5), so we do not measure how the tool does on the first day of a new patch. That cost was about a fifth of the signal for 16.5 to 16.6 and not measurable for 16.19 to 16.20. On the 110k dataset, test sets were also small (15k-16k games), so differences below ~0.0005 log loss could not be told apart from noise. On the collected data, the test set is 15% of every exported game.
 13. **Calibration checked only on average.** Predictions are well calibrated overall, but there are too few extreme predictions to check unusual drafts.
 
 ### Engineering

@@ -1,5 +1,6 @@
 """
-Compare draft-only models on one time-based split (test = latest patch), plus two experiments:
+Compare draft-only models on one random split inside each patch (test = 15% of every patch),
+plus two experiments:
 
   1. Learning curves: train each model on 1/8, 1/4, 1/2 and all of the training games. If the
      models that learn matchups/synergies gain on the plain strength model as data grows,
@@ -22,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from src.draft_eval import compute_metrics, paired_bootstrap_ci, per_row_log_loss
-from src.draft_features import LABEL_COL, load_raw_drafts, time_split
+from src.draft_features import LABEL_COL, load_raw_drafts, within_patch_split
 from src.draft_models import (
     FM_CONFIGS,
     ConstantModel,
@@ -187,8 +188,8 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
 
     df = load_raw_drafts(args.csv)
-    train_df, val_df, test_df = time_split(df)
-    print(f"{args.csv}: train {len(train_df)} | val {len(val_df)} | test {len(test_df)} (patch {test_df['patch'].iloc[0]})")
+    train_df, val_df, test_df = within_patch_split(df, seed=SEED)
+    print(f"{args.csv}: train {len(train_df)} | val {len(val_df)} | test {len(test_df)} ({test_df['patch'].nunique()} patches in test)")
 
     print("\n[1/3] Main comparison")
     results, boot, configs, test_preds = run_main(train_df, val_df, test_df, not args.no_transformer)
