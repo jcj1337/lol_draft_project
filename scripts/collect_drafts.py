@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -51,6 +52,7 @@ EXPORT_DIR = DATA_DIR / "exports"
 # games shorter than this ended early (a leaver, early surrender) and say little about the draft;
 # they stay in the database but are left out of exports
 MIN_EXPORT_DURATION_SECONDS = 15 * 60
+EXPORT_CHUNK_ROWS = 200_000
 ENV_PATH = Path(".env")
 
 QUEUE = "RANKED_SOLO_5x5"
@@ -611,7 +613,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 def cmd_export(args: argparse.Namespace) -> None:
     conn = connect()
     init_db(conn)
-    df = pd.read_sql_query(
+    chunks = pd.read_sql_query(
         f"""
         SELECT match_id, platform AS source_platform, region AS source_region, patch, game_version,
                game_creation, game_duration, n_diamond_plus, n_emerald, crawled_from,
@@ -622,18 +624,25 @@ def cmd_export(args: argparse.Namespace) -> None:
         """,
         conn,
         params=(args.min_diamond, args.min_emerald_plus, MIN_EXPORT_DURATION_SECONDS),
+        chunksize=EXPORT_CHUNK_ROWS,
+        # fixed, because inferred per chunk an all-NULL chunk would print n_emerald unlike a chunk with counts
+        dtype={"n_emerald": "Int8"},
     )
-    if args.out:
-        out = Path(args.out)
-    elif args.min_emerald_plus:
-        out = EXPORT_DIR / f"drafts_emerald{args.min_emerald_plus}plus_{len(df)}.csv"
+    if args.min_emerald_plus:
+        name = f"drafts_emerald{args.min_emerald_plus}plus"
     elif args.min_diamond:
-        out = EXPORT_DIR / f"drafts_diamond{args.min_diamond}plus_{len(df)}.csv"
+        name = f"drafts_diamond{args.min_diamond}plus"
     else:
-        out = EXPORT_DIR / f"drafts_all_{len(df)}.csv"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False)
-    print(f"Exported {len(df)} matches (n_diamond_plus >= {args.min_diamond}, "
+        name = "drafts_all"
+    tmp = Path(f"{args.out}.tmp") if args.out else EXPORT_DIR / f"{name}.csv.tmp"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i, chunk in enumerate(chunks):
+        chunk.to_csv(tmp, mode="a" if i else "w", header=not i, index=False)
+        n += len(chunk)
+    out = Path(args.out) if args.out else EXPORT_DIR / f"{name}_{n}.csv"
+    os.replace(tmp, out)
+    print(f"Exported {n} matches (n_diamond_plus >= {args.min_diamond}, "
           f"Emerald or higher >= {args.min_emerald_plus}, at least {MIN_EXPORT_DURATION_SECONDS // 60} min long) to {out}")
 
 
