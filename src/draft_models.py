@@ -89,27 +89,42 @@ class LogRegModel(DraftModel):
         self.pair_scale_grid = pair_scale_grid if self.has_pairs else (1.0,)
         self.min_pair_count = min_pair_count
 
-    def _fit(self, df, w, C, pair_scale):
+    def _featurize(self, df, pair_scale):
         feat = DraftFeaturizer(self.groups, self.min_pair_count, pair_scale).fit(df)
+        return feat, feat.transform(df)
+
+    def _solve(self, X, df, w, C):
         model = LogisticRegression(C=C, max_iter=5000)
-        model.fit(feat.transform(df), _labels(df), sample_weight=_weights(df, w))
-        return feat, model
+        model.fit(X, _labels(df), sample_weight=_weights(df, w))
+        return model
+
+    def _tune_c(self, train_df, val_df, w, pair_scale):
+        feat, X = self._featurize(train_df, pair_scale)
+        X_val = feat.transform(val_df)
+        y_val = _labels(val_df)
+        best = None
+        for C in self.c_grid:
+            model = self._solve(X, train_df, w, C)
+            loss = compute_metrics(y_val, model.predict_proba(X_val)[:, 1])["log_loss"]
+            if best is None or loss < best[0]:
+                best = (loss, C, pair_scale, feat, model)
+        return best
 
     def tune(self, train_df, val_df, w=None):
+        """Also sets c_at_edge: the best C is the lowest or highest in c_grid, so the grid may be too narrow."""
         best = None
-        y_val = _labels(val_df)
         for pair_scale in self.pair_scale_grid:
-            for C in self.c_grid:
-                feat, model = self._fit(train_df, w, C, pair_scale)
-                loss = compute_metrics(y_val, model.predict_proba(feat.transform(val_df))[:, 1])["log_loss"]
-                if best is None or loss < best[0]:
-                    best = (loss, C, pair_scale, feat, model)
+            candidate = self._tune_c(train_df, val_df, w, pair_scale)
+            if best is None or candidate[0] < best[0]:
+                best = candidate
         _, C, pair_scale, self.feat, self.model = best
         self.config = {"C": C, "pair_scale": pair_scale}
+        self.c_at_edge = C in (self.c_grid[0], self.c_grid[-1])
         return self.config
 
     def refit(self, fit_df, w=None):
-        self.feat, self.model = self._fit(fit_df, w, self.config["C"], self.config["pair_scale"])
+        self.feat, X = self._featurize(fit_df, self.config["pair_scale"])
+        self.model = self._solve(X, fit_df, w, self.config["C"])
 
     def predict(self, df):
         return self.model.predict_proba(self.feat.transform(df))[:, 1]
