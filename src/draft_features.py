@@ -11,6 +11,7 @@ No player features (win rate, games played) are used anywhere in this module.
 """
 from __future__ import annotations
 
+import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,7 @@ FEATURE_GROUPS = ["champ", "champ_role", "matchup", "synergy"]
 PAIR_GROUPS = {"matchup", "synergy"}
 
 RANK_GROUPS = ("core", "mixed", "emerald")
+NON_CORE_GROUPS = RANK_GROUPS[1:]
 RANK_GROUP_DTYPE = pd.CategoricalDtype(list(RANK_GROUPS))
 CORE_MIN_DIAMOND = 8
 NON_CORE_GROUP_OF_CRAWLER = {"diamond_plus": "mixed", "emerald": "emerald"}
@@ -137,6 +139,84 @@ def within_patch_split(
         df[val_mask].reset_index(drop=True),
         df[test_mask].reset_index(drop=True),
     )
+
+
+def patch_key(patch: str) -> tuple[int, int]:
+    major, minor = patch.split(".")
+    return int(major), int(minor)
+
+
+@dataclass(frozen=True)
+class RankWeights:
+    """
+    Training weight of each non-core rank group; core games always weigh 1. A weight of 0 drops the
+    group's games before featurizing, so they reach neither the vocabulary nor min_pair_count, and
+    the model is the same as never having had them.
+    """
+    mixed: float
+    emerald: float
+
+    def __post_init__(self) -> None:
+        for group in NON_CORE_GROUPS:
+            value = getattr(self, group)
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"the weight of {group} must be a finite number >= 0, got {value}")
+
+    @classmethod
+    def uniform(cls) -> RankWeights:
+        return cls(**dict.fromkeys(NON_CORE_GROUPS, 1.0))
+
+    @classmethod
+    def core_only(cls) -> RankWeights:
+        return cls(**dict.fromkeys(NON_CORE_GROUPS, 0.0))
+
+    @classmethod
+    def parse(cls, text: str) -> RankWeights:
+        """'mixed=0.25,emerald=0' -> RankWeights(mixed=0.25, emerald=0.0); every non-core group exactly once."""
+        weights: dict[str, float] = {}
+        for item in text.split(","):
+            group, sep, value = (part.strip() for part in item.partition("="))
+            if not sep:
+                raise ValueError(f"expected group=weight, got {item.strip()!r} in {text!r}")
+            if group not in NON_CORE_GROUPS:
+                raise ValueError(f"unknown rank group {group!r}; the groups are {', '.join(NON_CORE_GROUPS)}")
+            if group in weights:
+                raise ValueError(f"rank group {group!r} is given twice in {text!r}")
+            try:
+                weights[group] = float(value)
+            except ValueError:
+                raise ValueError(f"the weight of {group} is not a number: {value!r}") from None
+        missing = [g for g in NON_CORE_GROUPS if g not in weights]
+        if missing:
+            raise ValueError(f"{text!r} has no weight for {', '.join(missing)}")
+        return cls(**weights)
+
+    def __str__(self) -> str:
+        return ",".join(f"{g}={_weight_text(getattr(self, g))}" for g in NON_CORE_GROUPS)
+
+    def per_row(self, rank_group: pd.Series) -> np.ndarray:
+        codes = pd.Categorical(rank_group, dtype=RANK_GROUP_DTYPE).codes
+        if (codes < 0).any():
+            raise ValueError("rank_group holds values outside RANK_GROUPS")
+        return np.array([1.0, *(getattr(self, g) for g in NON_CORE_GROUPS)])[codes]
+
+
+def _weight_text(value: float) -> str:
+    text = repr(float(value))
+    return text.removesuffix(".0")
+
+
+def training_set(df: pd.DataFrame, rank_weights: RankWeights, gamma: float = 1.0) -> tuple[pd.DataFrame, np.ndarray]:
+    """
+    Fit rows and sample weights from loaded games. A game's weight is its rank group's weight times
+    gamma ** patch age (age 0 = the newest patch in `df`). Games with weight 0 are left out; the
+    weights line up with the returned rows.
+    """
+    patches = sorted(df["patch"].unique(), key=patch_key)
+    age = df["patch"].map({p: len(patches) - 1 - i for i, p in enumerate(patches)}).to_numpy()
+    w = rank_weights.per_row(df["rank_group"]) * gamma ** age
+    keep = w > 0
+    return df[keep].reset_index(drop=True), w[keep]
 
 
 # ------------------------------ features ------------------------------
