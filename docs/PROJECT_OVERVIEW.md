@@ -126,7 +126,7 @@ A second person with their own API key can collect Emerald games on their own co
 .venv\Scripts\python -m scripts.collect_drafts export --min-emerald-plus 8   # games with 8+ Emerald-or-higher players
 ```
 
-Games found through the Diamond+ collector have no Emerald count (`n_emerald` is empty), so for them `--min-emerald-plus` counts only Diamond+ players. Because each game keeps its rank mix, a model trained on Emerald games can be compared with one trained on Diamond+ games to check how much rank matters.
+Games found through the Diamond+ collector have no Emerald count (`n_emerald` is empty), so for them `--min-emerald-plus` counts only Diamond+ players. Because each game keeps its rank mix, lower-rank games can be added to the Diamond+ model's training at a reduced weight, and `scripts/rank_mix.py` measures whether that helps (§8.1).
 
 ---
 
@@ -330,6 +330,32 @@ Example:
     --red top=Malphite jg=Kha'Zix adc=Jhin --bans Ahri Zed
 ```
 
+### 8.1 Lower-rank games in training
+
+`load_raw_drafts` puts each game in one rank group (`RANK_GROUPS` in `src/draft_features.py`):
+
+| Group | Games |
+|---|---|
+| `core` | 8 or more of the 10 players are Diamond+, whichever collector found the game. |
+| `mixed` | The other games the Diamond+ collector found. |
+| `emerald` | The other games the Emerald collector found (§4.3). |
+
+Older CSVs without `n_diamond_plus`, such as the 110k dataset, are all `core`.
+
+`fit --rank-weights mixed=0.25,emerald=0` trains with every core game at weight 1 and every other game at its group's weight. A weight of 0 leaves the group out entirely, so its games add nothing to the features either. Every group must be named. Without the flag every game weighs 1, which is how `fit` trained before the flag existed. `--gamma` multiplies on top of the rank weight.
+
+`scripts/rank_mix.py` measures which weights help Diamond+ predictions:
+
+1. Only core games are split into train, validation and test. Lower-rank games only ever join training.
+2. Core only: C and the pair scale are tuned on core validation.
+3. One group at a time, each weight in `--weights` (default 0.1, 0.25, 0.5, 1) is tried with C re-tuned around the core-only value. A group keeps its best weight if that beats the best arm so far on core validation, and 0 otherwise. Groups with no games are skipped, so the same command works before and after the Emerald merge.
+4. Uniform weights (every group at 1) are tuned the same way.
+5. The chosen weights have the lowest core-validation log loss. Only then are core only, the chosen weights and uniform weights refit on core train and validation, scored once on core test, and compared with core only by a paired bootstrap.
+
+It prints the `fit` command for the chosen weights and writes `arms.csv` and `test.csv` to `--out` (default `outputs/rank_mix/`).
+
+On a 1-in-20 sample of the collector (99k core training games, 216k mixed), every mixed weight beat core only on validation. On test, the chosen weight 0.5 improved log loss by 0.0014 (95% CI 0.0010 to 0.0018) and uniform weights by 0.0018 (0.0012 to 0.0025). With 20 times more core games the gain from extra games is expected to shrink, so the decision should come from a run on a full export.
+
 ---
 
 ## 9. How to run everything
@@ -349,6 +375,8 @@ py -3.13 -m venv .venv
 | Logistic regression baseline + example rankings | `.venv\Scripts\python -m scripts.train_draft_baseline --csv <csv> --out <dir>` |
 | Compare all models, learning curves, recency | `.venv\Scripts\python -m scripts.compare_models --csv <csv> --out <dir>` (add `--no-transformer` to save time) |
 | Train / use the recommender | `.venv\Scripts\python -m scripts.recommend fit ...` / `rank ...` |
+| Measure whether lower-rank games help | `.venv\Scripts\python -m scripts.rank_mix --csv <export>` (§8.1) |
+| Check the featurizer against an older commit | `.venv\Scripts\python -m scripts.verify_featurizer --csv <csv> --legacy-rev <commit>` |
 
 Without `--csv`, scripts use the original 110k-game dataset.
 
@@ -359,12 +387,14 @@ Without `--csv`, scripts use the original 110k-game dataset.
 | `scripts/collect_drafts.py` | New data collector (roster, crawling, SQLite, export, status, pack/merge). |
 | `scripts/collect_emerald.py` | Runs the collector on Emerald players, for a second computer and key (§4.3). |
 | `src/riot_client.py` | Riot API client: rate limiting per region and per endpoint, key-expiry pause. |
-| `src/draft_features.py` | Loading raw drafts, the within-patch train/validation/test split, symmetric features for linear models. |
+| `src/draft_features.py` | Loading raw drafts, rank groups and training weights, the within-patch train/validation/test split, symmetric features for linear models. |
 | `src/draft_models.py` | All current models (§6). |
 | `src/draft_eval.py` | Metrics and bootstrap. |
 | `scripts/train_draft_baseline.py` | Logistic-regression variants, leakage check, example rankings. |
 | `scripts/compare_models.py` | Every model on one split + learning curves + recency weighting. |
 | `scripts/recommend.py` | Train and query the pick recommender. |
+| `scripts/rank_mix.py` | Measures whether lower-rank games improve the Diamond+ model, and at what weight (§8.1). |
+| `scripts/verify_featurizer.py` | Checks that the loader, featurizer and logistic regression give exactly the results of an older commit. |
 | `outputs/draft_baseline/`, `outputs/model_comparison/` | Results, plots and configs from the runs described here. |
 | `data/collector/` | Collector database, log and exports (git-ignored; can grow to gigabytes). |
 | `scripts/build_draft_dataset.py`, `clean_draft_dataset.py`, `train*.py`, `src/model.py`, `src/embedding_ids.py`, `src/champion_labels.py` | Original pipeline (§6.7). |
@@ -413,5 +443,5 @@ This section lists what the current model does **not** do or does poorly, groupe
 4. **Player experience on each champion (gaps 1 and 7).** The collector already stores player IDs. For each game, count how often each player played their champion *before* that game (never after, to avoid another leak) and add it as a feature. This is likely the single biggest improvement, both for accuracy and for the one-trick problem.
 5. **Partial drafts (gap 8).** Train with randomly hidden picks so the model learns what an unknown pick is worth in each position, instead of assuming an average champion.
 6. **Uncertainty (gap 10).** Show a range per candidate (e.g. from bootstrap refits of the logistic regression), or flag candidates whose difference from the best option is within noise.
-7. **Rank scope (gap 2).** Decide whether to extend collection below Diamond and add the rank bracket as an input.
+7. **Rank scope (gap 2).** Run `rank_mix` on a full export, before and after the Emerald merge, to see whether lower-rank games improve Diamond+ predictions (§8.1). Then decide whether to extend collection below Diamond and add the rank bracket as an input.
 8. **Clean up the repository (gap 16).** Move the legacy scripts into an `archive/` folder with a note about the leak.

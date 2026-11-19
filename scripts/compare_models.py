@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from src.draft_eval import compute_metrics, paired_bootstrap_ci, per_row_log_loss
-from src.draft_features import LABEL_COL, load_raw_drafts, within_patch_split
+from src.draft_features import LABEL_COL, load_raw_drafts, patch_key, within_patch_split
 from src.draft_models import (
     FM_CONFIGS,
     ConstantModel,
@@ -41,11 +41,6 @@ CURVE_FRACTIONS = (0.125, 0.25, 0.5, 1.0)
 CURVE_SEEDS = (0, 1)  # repeats for fractions < 1 (small subsets are noisy)
 RECENCY_GAMMAS = (1.0, 0.7, 0.5, 0.3)
 RECENCY_TARGETS = 3   # number of most recent patches to predict
-
-
-def patch_key(patch: str) -> tuple[int, int]:
-    major, minor = patch.split(".")
-    return int(major), int(minor)
 
 
 def curve_models() -> list:

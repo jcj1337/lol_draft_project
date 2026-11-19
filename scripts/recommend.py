@@ -1,7 +1,8 @@
 """
 Pick recommendations from a draft-only logistic regression.
 
-1. Train and save a model (all games in the CSV; older patches down-weighted by --gamma):
+1. Train and save a model (the games in the CSV; lower-rank games weighted by --rank-weights,
+   older patches down-weighted by --gamma):
     python -m scripts.recommend fit --csv data/collector/exports/<export>.csv
 
 2. Rank the champions you could pick. Give the picks made so far as role=Champion; roles are
@@ -23,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.draft_features import LABEL_COL, ROLES, load_raw_drafts
+from src.draft_features import LABEL_COL, ROLES, RankWeights, load_raw_drafts, patch_key, training_set
 from src.draft_models import LogRegModel
 
 DEFAULT_CSV = Path("data/processed/draft_dataset_multiregion_diamondplus_110000.csv")
@@ -33,16 +34,13 @@ MIN_CANDIDATE_PICK_RATE = 0.01  # same filter as train_draft_baseline.py
 ALIASES = {"wukong": "monkeyking", "nunu&willump": "nunu", "nunuwillump": "nunu", "renataglasc": "renata"}
 
 
-def patch_key(patch: str) -> tuple[int, int]:
-    major, minor = patch.split(".")
-    return int(major), int(minor)
-
-
 def cmd_fit(args: argparse.Namespace) -> None:
-    df = load_raw_drafts(args.csv)
+    try:
+        rank_weights = RankWeights.parse(args.rank_weights)
+    except ValueError as e:
+        raise SystemExit(f"--rank-weights: {e}")
+    df, weights = training_set(load_raw_drafts(args.csv), rank_weights, args.gamma)
     patches = sorted(df["patch"].unique(), key=patch_key)
-    distance = df["patch"].map({p: len(patches) - 1 - i for i, p in enumerate(patches)}).to_numpy()
-    weights = args.gamma ** distance
 
     model = LogRegModel(args.groups.split(","), name="recommender")
     model.config = {"C": args.C, "pair_scale": args.pair_scale}
@@ -52,8 +50,10 @@ def cmd_fit(args: argparse.Namespace) -> None:
     meta = {
         "csv": str(args.csv),
         "games": len(df),
+        "games_by_rank_group": {g: int(n) for g, n in df["rank_group"].value_counts(sort=False).items()},
         "patches": patches,
         "gamma": args.gamma,
+        "rank_weights": str(rank_weights),
         "groups": model.groups,
         "config": model.config,
         "blue_side_win_rate": float(df[LABEL_COL].mean()),
@@ -61,7 +61,8 @@ def cmd_fit(args: argparse.Namespace) -> None:
     }
     with open(args.model, "wb") as f:
         pickle.dump({"feat": model.feat, "model": model.model, "meta": meta}, f)
-    print(f"Trained on {len(df)} games (patches {patches[0]}-{patches[-1]}, gamma {args.gamma}); saved to {args.model}")
+    print(f"Trained on {len(df)} games (patches {patches[0]}-{patches[-1]}, gamma {args.gamma}, "
+          f"rank weights {rank_weights}); saved to {args.model}")
 
 
 def parse_picks(items: list[str] | None, known: dict[str, str]) -> dict[str, str | None]:
@@ -142,6 +143,9 @@ def main() -> None:
     p.add_argument("--C", type=float, default=0.01)
     p.add_argument("--pair-scale", type=float, default=0.5)
     p.add_argument("--gamma", type=float, default=1.0, help="weight multiplier per patch of age (1.0 = no down-weighting)")
+    p.add_argument("--rank-weights", default=str(RankWeights.uniform()),
+                   help="training weight of each lower-rank group, e.g. mixed=0.25,emerald=0 (core games weigh 1, "
+                        "0 leaves a group out); scripts.rank_mix measures which weights help")
     p.set_defaults(func=cmd_fit)
 
     p = sub.add_parser("rank", help="rank the champions you could pick")
